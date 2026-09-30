@@ -235,10 +235,9 @@ export default class UbuntuMaintenanceExtension extends Extension {
         try {
             const rawUrl = this._settings.get_string('git-raw-metadata-url');
             const res = await this._updateChecker.checkForUpdates(rawUrl);
-            if (res && res.updateAvailable) {
-                this._remoteUpdateInfo = res;
-                if (this._lastData) this._rebuildMenu(this._lastData);
-            }
+            const was = !!(this._remoteUpdateInfo && this._remoteUpdateInfo.updateAvailable);
+            this._remoteUpdateInfo = (res && res.updateAvailable) ? res : null;
+            if (was !== !!this._remoteUpdateInfo && this._lastData) this._rebuildMenu(this._lastData);
         } catch (e) {
             console.warn(`[ubuntu-maintenance] Git update check failed: ${e.message}`);
         }
@@ -1293,7 +1292,11 @@ export default class UbuntuMaintenanceExtension extends Extension {
             'Jetzt aktualisieren',
             'view-refresh-symbolic'
         );
-        refreshItem.connect('activate', () => this._triggerCheck());
+        refreshItem.connect('activate', () => {
+            this._triggerCheck();
+            if (this._settings && this._settings.get_boolean('update-check-enabled'))
+                this._checkExtensionUpdate();
+        });
         menu.addMenuItem(refreshItem);
 
         const prefsItem = new PopupMenu.PopupImageMenuItem(

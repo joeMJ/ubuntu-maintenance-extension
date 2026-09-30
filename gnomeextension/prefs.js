@@ -138,7 +138,7 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
         // Versions-Status und Manueller Prüf-Button
         const infoRow = new Adw.ActionRow({
             title: `Installierte Version: v${currentVersion}`,
-            subtitle: 'Aktualisierung via ./update.sh oder ./install.sh im Terminal',
+            subtitle: 'Aktualisierung über den Update-Eintrag im Menü (selfupdate.py) oder per install-remote.sh',
         });
 
         const checkBtn = new Gtk.Button({
@@ -154,7 +154,7 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
                 const rawUrl = settings.get_string('git-raw-metadata-url');
                 const res = await updateChecker.checkForUpdates(rawUrl);
                 if (res.updateAvailable) {
-                    infoRow.subtitle = `Update verfügbar: v${res.remoteVersion} (Aktuell: v${currentVersion})! Führe ./update.sh aus.`;
+                    infoRow.subtitle = `Update verfügbar: v${res.remoteVersion} (Aktuell: v${currentVersion})! Nutze den Update-Eintrag im Menü oder starte selfupdate.py.`;
                 } else if (res.error) {
                     infoRow.subtitle = `Prüfung fehlgeschlagen: ${res.error}`;
                 } else {
