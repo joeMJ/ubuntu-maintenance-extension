@@ -60,7 +60,15 @@ Native GNOME Shell Extension für Ubuntu 24.04+ (kompatibel mit GNOME 45, 46, 47
 
 ## 🚀 Installation & Update
 
-### Installation
+### Installation aus dem Release (empfohlen)
+```bash
+curl -fsSLO https://raw.githubusercontent.com/joeMJ/ubuntu-maintenance-extension/main/install-remote.sh
+less install-remote.sh   # erst lesen, dann ausführen
+bash install-remote.sh
+```
+Lädt das neueste Release, prüft die SHA256-Summe und führt `gnomeextension/install.sh` mit Benutzerrechten aus. Die Prüfsumme erkennt Übertragungsfehler, schützt aber nicht vor einem kompromittierten GitHub-Konto.
+
+### Installation aus einem Klon
 ```bash
 cd gnomeextension
 ./install.sh
@@ -68,10 +76,10 @@ cd gnomeextension
 Das Installationsskript kompiliert die GSettings-Schemas, kopiert alle Dateien nach `~/.local/share/gnome-shell/extensions/ubuntu-maintenance@johnlose.de` und aktiviert die Extension.
 
 ### Aktualisierung
-```bash
-cd gnomeextension
-./update.sh
-```
+Im Menü erscheint bei einer neueren Version ein Update-Eintrag. Er öffnet ein Terminal und startet `selfupdate.py`: Release laden, SHA256 prüfen, sicher entpacken, nach Rückfrage installieren. Manuell: `python3 ~/.local/share/gnome-shell/extensions/ubuntu-maintenance@johnlose.de/selfupdate.py [--check]`. Aus einem Klon: `./update.sh` (`git pull` + Installation).
+
+### Release veröffentlichen (Maintainer)
+`version` in `gnomeextension/metadata.json` erhöhen, committen, dann `git tag vN && git push origin vN`. Der Workflow `.github/workflows/release.yml` baut Archiv und Prüfsumme und legt das Release an.
 
 ---
 

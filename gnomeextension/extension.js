@@ -848,7 +848,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
                 'software-update-available-symbolic'
             );
             bannerItem.connect('activate', () => {
-                this._launchTerminal('./update.sh');
+                this._launchTerminal(`python3 '${GLib.build_filenamev([this.path, 'selfupdate.py'])}'`);
             });
             menu.addMenuItem(bannerItem);
             menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());

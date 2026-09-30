@@ -1,0 +1,34 @@
+name: release
+
+# Ein Release entsteht durch das Pushen eines Tags vN (N = "version" in gnomeextension/metadata.json).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag gegen metadata.json prüfen
+        run: |
+          v=$(python3 -c 'import json;print(json.load(open("gnomeextension/metadata.json"))["version"])')
+          [ "${GITHUB_REF_NAME}" = "v${v}" ] || { echo "Tag ${GITHUB_REF_NAME} passt nicht zu metadata.json (version ${v})"; exit 1; }
+
+      - name: Archiv und Prüfsumme bauen
+        run: |
+          asset="ubuntu-maintenance-extension-${GITHUB_REF_NAME}.tar.gz"
+          git archive --format=tar.gz --prefix="ubuntu-maintenance-extension-${GITHUB_REF_NAME}/" -o "$asset" "${GITHUB_REF_NAME}"
+          sha256sum "$asset" > "$asset.sha256"
+          cat "$asset.sha256"
+
+      - name: Release veröffentlichen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" ubuntu-maintenance-extension-*.tar.gz ubuntu-maintenance-extension-*.tar.gz.sha256 \
+            --title "${GITHUB_REF_NAME}" --notes "Automatisches Release. Private Hobby-Software ohne Support, siehe README."
