@@ -78,6 +78,13 @@ Das Installationsskript kompiliert die GSettings-Schemas, kopiert alle Dateien n
 ### Aktualisierung
 Im Menü erscheint bei einer neueren Version ein Update-Eintrag. Er öffnet ein Terminal und startet `selfupdate.py`: Release laden, SHA256 prüfen, sicher entpacken, nach Rückfrage installieren. Manuell: `python3 ~/.local/share/gnome-shell/extensions/ubuntu-maintenance@johnlose.de/selfupdate.py [--check]`. Aus einem Klon: `./update.sh` (`git pull` + Installation).
 
+### Deinstallation
+```bash
+cd gnomeextension
+./uninstall.sh           # behält Einstellungen, Ignoreliste und Log-Basislinie
+./uninstall.sh --purge   # entfernt auch Einstellungen und Benutzerdaten (mit Rückfrage)
+```
+
 ### Release veröffentlichen (Maintainer)
 `version` in `gnomeextension/metadata.json` erhöhen, committen, dann `git tag vN && git push origin vN`. Der Workflow `.github/workflows/release.yml` baut Archiv und Prüfsumme und legt das Release an.
 
