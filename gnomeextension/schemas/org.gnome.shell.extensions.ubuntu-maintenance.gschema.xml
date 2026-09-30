@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.ubuntu-maintenance" path="/org/gnome/shell/extensions/ubuntu-maintenance/">
+
+    <!-- Panel & Layout -->
+    <key name="panel-position" type="s">
+      <choices>
+        <choice value="left"/>
+        <choice value="center"/>
+        <choice value="right"/>
+      </choices>
+      <default>'right'</default>
+      <summary>Position im Panel</summary>
+      <description>Platzierung des Status-Icons in der oberen GNOME-Leiste.</description>
+    </key>
+
+    <key name="refresh-interval-minutes" type="i">
+      <range min="5" max="1440"/>
+      <default>30</default>
+      <summary>Aktualisierungsintervall (Minuten)</summary>
+      <description>Intervall für die Hintergrundprüfung des System- und Sicherheitsstatus.</description>
+    </key>
+
+    <key name="notify-on-updates" type="b">
+      <default>true</default>
+      <summary>Benachrichtigung bei Updates</summary>
+      <description>Desktop-Benachrichtigung anzeigen, wenn neue System-Updates verfügbar sind.</description>
+    </key>
+
+    <key name="notify-on-alert" type="b">
+      <default>true</default>
+      <summary>Benachrichtigung bei Sicherheitswarnungen</summary>
+      <description>Kritische Benachrichtigung anzeigen bei unbekannten Ports oder Sicherheitsfunden.</description>
+    </key>
+
+    <key name="terminal-command" type="s">
+      <default>'gnome-terminal --'</default>
+      <summary>Terminal-Befehl</summary>
+      <description>Befehl zum Starten des interaktiven Wartungsskripts im Terminal.</description>
+    </key>
+
+    <!-- Extension Update Settings -->
+    <key name="update-check-enabled" type="b">
+      <default>true</default>
+      <summary>Automatische Versionsprüfung der Extension</summary>
+      <description>Prüft regelmäßig auf neuere Versionen im konfigurierten Git-Repository.</description>
+    </key>
+
+    <key name="git-update-url" type="s">
+      <default>'https://github.com/joeMJ/ubuntu-maintenance-extension.git'</default>
+      <summary>Git Clone / Update URL</summary>
+      <description>Git-Remote-URL für Extension-Aktualisierungen.</description>
+    </key>
+
+    <key name="git-raw-metadata-url" type="s">
+      <default>'https://raw.githubusercontent.com/joeMJ/ubuntu-maintenance-extension/main/gnomeextension/metadata.json'</default>
+      <summary>Git Raw Metadata URL</summary>
+      <description>HTTP(S)-URL zur Prüfung der neuesten metadata.json (GitHub / Gitea).</description>
+    </key>
+
+  </schema>
+</schemalist>

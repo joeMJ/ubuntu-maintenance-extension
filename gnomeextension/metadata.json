@@ -1,0 +1,16 @@
+{
+  "name": "Ubuntu Maintenance Indicator",
+  "description": "Native GNOME Shell Extension für System-Updates, Sicherheitsstatus, Port-Wächter und Wartungsläufe",
+  "uuid": "ubuntu-maintenance@johnlose.de",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "version": 1,
+  "url": "https://github.com/joeMJ/ubuntu-maintenance-extension",
+  "settings-schema": "org.gnome.shell.extensions.ubuntu-maintenance"
+}

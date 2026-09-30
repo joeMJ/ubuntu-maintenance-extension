@@ -1,0 +1,93 @@
+{
+  "settings": {
+    "check_interval_seconds": 1800,
+    "notify_on_updates": true,
+    "notify_on_security_alert": true,
+    "terminal_command": "gnome-terminal --"
+  },
+  "apps": [
+    {
+      "name": "Brave",
+      "pkg": "brave-browser",
+      "repo_kw": "brave.com",
+      "is_snap_target": "false"
+    },
+    {
+      "name": "Firefox",
+      "pkg": "firefox",
+      "repo_kw": "mozilla.org|mozillateam",
+      "is_snap_target": "true"
+    },
+    {
+      "name": "Opera",
+      "pkg": "opera-stable",
+      "repo_kw": "opera.com",
+      "is_snap_target": "false"
+    },
+    {
+      "name": "Thunderbird",
+      "pkg": "thunderbird",
+      "repo_kw": "mozillateam",
+      "is_snap_target": "true"
+    },
+    {
+      "name": "KeePassXC",
+      "pkg": "keepassxc",
+      "repo_kw": "phoerious",
+      "is_snap_target": "true"
+    },
+    {
+      "name": "Syncthing",
+      "pkg": "syncthing",
+      "repo_kw": "syncthing.net",
+      "is_snap_target": "true"
+    }
+  ],
+  "security": {
+    "allowed_ports": [
+      { "port": 22, "protocol": "tcp", "service": "SSH" },
+      { "port": 25, "protocol": "tcp", "service": "Postfix" },
+      { "port": 80, "protocol": "tcp", "service": "Nginx HTTP" },
+      { "port": 137, "protocol": "udp", "service": "NetBIOS-NS" },
+      { "port": 138, "protocol": "udp", "service": "NetBIOS-DGM" },
+      { "port": 139, "protocol": "tcp", "service": "Samba NetBIOS-SSN" },
+      { "port": 443, "protocol": "tcp", "service": "HTTPS" },
+      { "port": 445, "protocol": "tcp", "service": "Samba SMB" },
+      { "port": 5353, "protocol": "udp", "service": "mDNS/Avahi" },
+      { "port": 7070, "protocol": "tcp", "service": "AnyDesk" },
+      { "port": 10580, "protocol": "tcp", "service": "Wine / Application" },
+      { "port": 21027, "protocol": "udp", "service": "Syncthing Discovery" },
+      { "port": 22000, "protocol": "any", "service": "Syncthing Sync" },
+      { "port": 27036, "protocol": "any", "service": "Steam" }
+    ],
+    "allowed_processes": [
+      "syncthing",
+      "postfix",
+      "anydesk",
+      "nginx",
+      "smbd",
+      "nmbd",
+      "steam",
+      "wineserver64",
+      "avahi-daemon",
+      "cupsd",
+      "sshd",
+      "spotify"
+    ],
+    "rkhunter_log_path": "/var/log/rkhunter.log",
+    "lynis_report_path": "/var/log/lynis-report.dat",
+    "rkhunter_ignore_regex": [
+      "changed",
+      "replaced by a script",
+      "hidden directory",
+      "Checking for hidden files and directories",
+      "suspicious files and directories",
+      "suspicious file types",
+      "Checking /dev for suspicious",
+      "Info:",
+      "lwp-request",
+      "\\.resolv\\.conf\\.systemd-resolved\\.bak",
+      "\\.updated"
+    ]
+  }
+}
