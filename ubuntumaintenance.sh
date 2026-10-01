@@ -351,6 +351,71 @@ else
     echo -e " ${GREEN}✅ OK${NC}"
 fi
 
+# ------------------------------------------------------------------------------
+# Kernel-Schutz (Schicht 1: APT-Sperre für Cloud-/Spezial-Kernel, Schicht 2: Trockenlauf)
+# Hintergrund: Ein dist-upgrade hat einmal ungesehen den Google-Cloud-Kernel (-gke) installiert;
+# GRUB bootet die höchste Versionsnummer, ohne passende Header/NVIDIA-Module.
+# ------------------------------------------------------------------------------
+KERNEL_PIN_FILE="/etc/apt/preferences.d/no-cloud-kernels"
+KERNEL_USER_CFG="$HOME/.config/ubuntu-maintenance-indicator/maintenance.json"
+ALLOWED_KERNEL_FLAVOURS="generic"
+if [ -f "$KERNEL_USER_CFG" ] && command -v jq >/dev/null 2>&1; then
+    _fl=$(jq -r '(.allowed_kernel_flavours // []) | join(" ")' "$KERNEL_USER_CFG" 2>/dev/null)
+    [ -n "$_fl" ] && ALLOWED_KERNEL_FLAVOURS="$_fl"
+fi
+KERNEL_GUARD_BLOCKED=false
+
+# Liefert Paketnamen aus einer apt-Simulation, deren Kernel-Typ nicht erlaubt ist (z. B. linux-image-7.0.0-1008-gke).
+foreign_kernel_pkgs() {
+    local sim="$1" p fl
+    while read -r p; do
+        fl=$(echo "$p" | sed -nE 's/.*-[0-9]+\.[0-9]+\.[0-9]+-[0-9]+-([a-z][a-z0-9-]*)$/\1/p')
+        [ -z "$fl" ] && continue
+        echo " $ALLOWED_KERNEL_FLAVOURS " | grep -q " $fl " || echo "$p"
+    done < <(echo "$sim" | awk '/^Inst linux-/ {print $2}')
+}
+
+ensure_kernel_pin() {
+    [ -f "$KERNEL_PIN_FILE" ] && return 0
+    if [ ! -t 0 ] || [ ! -r /dev/tty ]; then
+        echo -e "\n${YELLOW}Kernel-Schutz: APT-Sperre $KERNEL_PIN_FILE fehlt (keine Rückfrage möglich, nicht interaktiv).${NC}"
+        return 0
+    fi
+    echo -e "\n${YELLOW}Kernel-Schutz: Die APT-Sperre für Cloud-Kernel fehlt ($KERNEL_PIN_FILE).${NC}"
+    echo "Sie verhindert, dass apt Kernel wie -gke, -gcp, -aws, -azure, -oracle, -ibm oder -kvm installiert."
+    if ask_yes_no "Sperre jetzt anlegen (sudo, schreibt $KERNEL_PIN_FILE)?"; then
+        printf '%s\n' \
+            '# Angelegt von ubuntumaintenance.sh: Cloud-/Spezial-Kernel auf diesem Rechner nie installieren.' \
+            'Package: linux-*-gke* linux-*-gcp* linux-*-aws* linux-*-azure* linux-*-oracle* linux-*-ibm* linux-*-kvm*' \
+            'Pin: release *' \
+            'Pin-Priority: -1' | sudo tee "$KERNEL_PIN_FILE" > /dev/null \
+            && echo -e "${GREEN}✅ Sperre angelegt.${NC}" \
+            || echo -e "${RED}Sperre konnte nicht angelegt werden.${NC}"
+    else
+        echo -e "${YELLOW}Ohne Sperre bleibt nur der Trockenlauf als Schutz.${NC}"
+    fi
+}
+
+show_kernel_guard_warning() {
+    local pkgs="$1"
+    echo -e "\n${RED}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║  ⛔  ACHTUNG: FREMD-KERNEL ERKANNT - dist-upgrade ist BLOCKIERT          ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${RED}Das Upgrade würde folgende Kernel-Pakete installieren, die NICHT zu diesem System passen:${NC}"
+    echo -e "${YELLOW}$(echo "$pkgs" | sed 's/^/   • /')${NC}"
+    echo -e "${RED}Erlaubte Kernel-Typen: $ALLOWED_KERNEL_FLAVOURS${NC}"
+    echo -e "${RED}Folgen, falls so ein Kernel installiert wird: GRUB bootet ihn wegen der höheren Versionsnummer${NC}"
+    echo -e "${RED}als Standard - ohne passende Header (VirtualBox/DKMS) und ohne NVIDIA-Modul (kein Grafiktreiber).${NC}"
+    echo -e "${CYAN}Was jetzt zu tun ist:${NC}"
+    echo -e "   1. Ursache klären:  ${GREEN}apt-get -s dist-upgrade | grep -E '^Inst linux-'${NC}"
+    echo -e "   2. Bei Cloud-Kerneln die Sperre prüfen:  ${GREEN}cat $KERNEL_PIN_FILE${NC}"
+    echo -e "   3. Nur wenn der Kernel wirklich gewollt ist, Typ erlauben: \"allowed_kernel_flavours\" in"
+    echo -e "      ${GREEN}$KERNEL_USER_CFG${NC}"
+    echo -e "${YELLOW}Normale Paket-Updates (apt-get upgrade) werden trotzdem eingespielt; nur dist-upgrade wird übersprungen.${NC}\n"
+}
+
+ensure_kernel_pin
+
 echo -e "\n${BLUE}[3/9] Prüfe auf APT-Upgrades...${NC}"
 
 SIM_OUTPUT=$(LANG=C apt-get upgrade -s 2>/dev/null)
@@ -373,9 +438,32 @@ else
         if [ "$DO_APT_UPDATE" = true ]; then
             echo -n "Installiere APT-Updates..."
             
+            # Kernel-Schutz (Schicht 2): Trockenlauf des dist-upgrade. Der Vorab-Check oben (apt-get upgrade -s)
+            # zeigt keine NEU hinzukommenden Pakete - genau die kann dist-upgrade aber installieren.
+            DIST_SIM_OUTPUT=$(LANG=C apt-get dist-upgrade -s 2>/dev/null)
+            FOREIGN_KERNELS=$(foreign_kernel_pkgs "$DIST_SIM_OUTPUT")
+            RUN_DIST_UPGRADE=true
+            if [ -n "$FOREIGN_KERNELS" ]; then
+                show_kernel_guard_warning "$FOREIGN_KERNELS"
+                RUN_DIST_UPGRADE=false
+                KERNEL_GUARD_BLOCKED=true
+                SEC_STATUS_SUMMARY="FREMD-KERNEL im Upgrade (dist-upgrade blockiert)"
+                if [ "$ASK_UPDATES" = true ]; then
+                    echo -e "${RED}Trotzdem dist-upgrade ausführen? Das installiert den Fremd-Kernel!${NC}"
+                    if ask_yes_no "dist-upgrade TROTZ Fremd-Kernel ausführen (nicht empfohlen)?"; then
+                        RUN_DIST_UPGRADE=true
+                        KERNEL_GUARD_BLOCKED=false
+                        SEC_STATUS_SUMMARY="OK"
+                        echo -e "${YELLOW}Auf deinen ausdrücklichen Wunsch fortgesetzt.${NC}"
+                    fi
+                fi
+                echo -n "Installiere APT-Updates (ohne dist-upgrade)..."
+            fi
+
             # Bugfix: apt-get upgrade & dist-upgrade in einem gemeinsamen Subshell-Block mit korrekter Fehlerbehandlung
             (
                 sudo env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" > /tmp/apt-upgrade.log 2>&1 &&
+                { [ "$RUN_DIST_UPGRADE" = true ] || exit 0; } &&
                 sudo env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -q -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" >> /tmp/apt-upgrade.log 2>&1
             ) &
             
@@ -614,6 +702,9 @@ elif [ "$TOTAL_UPDATES" -eq 0 ]; then
 else
     STEP3_SUMMARY="${GREEN}✅ OK${NC} ($TOTAL_UPDATES Updates installiert)"
 fi
+if [ "$KERNEL_GUARD_BLOCKED" = true ]; then
+    STEP3_SUMMARY="${RED}⛔ FREMD-KERNEL erkannt - dist-upgrade blockiert!${NC}"
+fi
 echo -e "\n${CYAN}Zusammenfassung Abschnitt 3:${NC} $STEP3_SUMMARY"
 
 # ==============================================================================
@@ -837,6 +928,27 @@ else
         fi
         echo -e "${CYAN}ℹ️ Log-Übersicht (nur [!] ist auffällig, [i] dient der Information):${NC}"
         echo "$LOG_REPORT" | sed 's/^/   /'
+    fi
+fi
+
+# Kernel-Wächter (laufender Kernel, Fremd-Kernel installiert, NVIDIA-Modul) - rein lesend, nutzt das Backend
+echo ""
+echo -n "Prüfe Kernel-Typ und NVIDIA-Modul... "
+if [ -z "$LOG_BACKEND" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo -e "${YELLOW}übersprungen${NC} (Backend der GNOME-Extension nicht gefunden)"
+else
+    KERNEL_REPORT=$(python3 "$LOG_BACKEND" --kernel-text 2>/dev/null)
+    if ! echo "$KERNEL_REPORT" | grep -q -E "^\[(OK|!)\] "; then
+        echo -e "${YELLOW}übersprungen${NC} (Backend zu alt - GNOME-Extension aktualisieren)"
+    else
+        if echo "$KERNEL_REPORT" | grep -q "^\[!\]"; then
+            echo -e "${RED}⛔ Auffälligkeiten${NC}"
+            [[ "$SEC_STATUS_SUMMARY" == "OK" ]] && SEC_STATUS_SUMMARY="Kernel-Auffälligkeiten"
+            echo -e "${RED}$(echo "$KERNEL_REPORT" | sed 's/^/   /')${NC}"
+        else
+            echo -e "${GREEN}✅ OK${NC}"
+            echo "$KERNEL_REPORT" | sed 's/^/   /'
+        fi
     fi
 fi
 

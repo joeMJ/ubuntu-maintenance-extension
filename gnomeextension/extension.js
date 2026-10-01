@@ -713,6 +713,26 @@ export default class UbuntuMaintenanceExtension extends Extension {
             listContainer.add_child(new St.Label({ text: 'KI-Übergabe: Menüeintrag „Diagnose für KI kopieren“ unten im Hauptmenü.', style: `color: ${dimmedColor}; font-size: 10px; margin-top: 8px;` }));
             sidecar.add_child(listContainer);
 
+        } else if (type === 'kernel') {
+            const kn = sec.kernel || {};
+            const nvk = kn.nvidia || {};
+            this._addSidecarHeader(sidecar, 'applications-system-symbolic', 'Kernel', (kn.flagged || 0) > 0 ? `{${kn.flagged} Hinweis}` : '{OK}', textColor, dimmedColor);
+
+            const listContainer = new St.BoxLayout({ vertical: true, style: 'margin-top: 8px;' });
+            const addLine = (ok, text) => {
+                const l = new St.Label({ text: `${ok ? '✓' : '!'} ${text}`, style: `color: ${ok ? statusGreen : statusOrange}; font-size: 11px; margin-top: 3px;` });
+                l.clutter_text.set_line_wrap(true);
+                listContainer.add_child(l);
+            };
+            addLine(!!kn.running_ok, `Läuft: ${kn.running || '?'} (Typ ${kn.flavour || '?'}, erlaubt: ${(kn.allowed || []).join(', ')})`);
+            const fi = kn.foreign_installed || [];
+            addLine(fi.length === 0, fi.length ? `Fremd-Kernel installiert: ${fi.slice(0, 3).join(', ')}${fi.length > 3 ? ' …' : ''}` : 'Kein Fremd-Kernel installiert');
+            if (nvk.hardware) {
+                const bad = nvk.driver_installed && !nvk.module_loaded;
+                addLine(!bad, nvk.module_loaded ? 'NVIDIA-Modul geladen' : (nvk.driver_installed ? 'NVIDIA-Treiber installiert, Modul NICHT geladen' : 'Kein NVIDIA-Treiber installiert'));
+            }
+            sidecar.add_child(listContainer);
+
         } else if (type === 'ufw') {
             const ufw = sec.ufw || {};
 
@@ -1066,6 +1086,21 @@ export default class UbuntuMaintenanceExtension extends Extension {
                 isDark
             );
             card2Box.add_child(logRow);
+        }
+
+        // Zeile 6: Kernel (Typ, Fremd-Kernel, NVIDIA-Modul)
+        if (sec.kernel) {
+            const kFlags = sec.kernel.flagged || 0;
+            const kernelRow = this._createInteractiveRow(
+                'applications-system-symbolic',
+                'Kernel',
+                kFlags > 0 ? `{${kFlags} Hinweis}` : '{OK}',
+                kFlags > 0 ? statusOrange : statusGreen,
+                textColor,
+                'kernel',
+                isDark
+            );
+            card2Box.add_child(kernelRow);
         }
 
         card2Item.add_child(card2Box);

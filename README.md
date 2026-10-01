@@ -30,6 +30,7 @@ Native GNOME Shell Extension für Ubuntu 24.04+ (kompatibel mit GNOME 45, 46, 47
     * Offene Netzwerk-Ports (autorisiert vs. unbekannt) mit detaillierter Protokoll-/Dienstauflistung.
     * Rootkit-Hunter (RKHunter) Status mit 1-Klick "Warnungen für KI in Zwischenablage kopieren" und `rkhunter --propupd` im Terminal.
     * Lynis System-Audit Timer.
+    * **Kernel-Wächter** (rein lesend): meldet, wenn ein Kernel-Typ läuft oder installiert ist, der nicht erlaubt ist (Standard: nur `generic`; pro Rechner erweiterbar über `allowed_kernel_flavours` in `~/.config/ubuntu-maintenance-indicator/maintenance.json`), und wenn für eine vorhandene NVIDIA-Karte das Treibermodul nicht geladen ist. CLI: `maintenance_backend.py --kernel-text`.
     * System-Logs (Journal des aktuellen Boots, rein lesend): Kategorien USB, Datenträger, Speicher/OOM, Hardware/Thermik, Abstürze, fehlgeschlagene Dienste sowie AppArmor-`DENIED` und Prio-err-Meldungen (gruppiert). Prinzip: **bekannt von neu unterscheiden, nicht wegfiltern.**
       * Ignore-Einträge tragen eine Begründung und optional eine Obergrenze pro Boot (`max_per_boot`); überschreitet ein bekannter Eintrag sie, wird er wieder auffällig.
       * Unterdrücktes bleibt sichtbar: je Kategorie steht „unterdrückt (bekannt): 20× Grund“.
@@ -84,6 +85,9 @@ cd gnomeextension
 ./uninstall.sh           # behält Einstellungen, Ignoreliste und Log-Basislinie
 ./uninstall.sh --purge   # entfernt auch Einstellungen und Benutzerdaten (mit Rückfrage)
 ```
+
+### Kernel-Schutz im Wartungsskript
+`ubuntumaintenance.sh` führt vor jedem `dist-upgrade` einen Trockenlauf aus (`apt-get -s dist-upgrade`). Würde dabei ein Kernel-Paket mit nicht erlaubtem Typ (z. B. `-gke`) installiert, wird `dist-upgrade` mit deutlicher Warnung übersprungen (mit `--ask` ist ein ausdrückliches Weitermachen möglich, Standard: Nein). Zusätzlich bietet das Skript an, `/etc/apt/preferences.d/no-cloud-kernels` anzulegen, eine APT-Sperre für Cloud-Kernel (`gke`, `gcp`, `aws`, `azure`, `oracle`, `ibm`, `kvm`).
 
 ### Release veröffentlichen (Maintainer)
 `version` in `gnomeextension/metadata.json` erhöhen, committen, dann `git tag vN && git push origin vN`. Der Workflow `.github/workflows/release.yml` baut Archiv und Prüfsumme und legt das Release an.

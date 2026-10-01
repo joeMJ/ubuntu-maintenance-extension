@@ -881,6 +881,95 @@ def check_lynis(cfg):
         "status": "ok" if warnings_count == 0 else "warning"
     }
 
+# ---------------------------------------------------------------------------
+# Kernel-Wächter: laufender/installierter Kernel-Typ und NVIDIA-Modul (rein lesend)
+# ---------------------------------------------------------------------------
+KERNEL_FLAVOUR_RE = re.compile(r"(?:^|-)\d+\.\d+\.\d+-\d+-([a-z][a-z0-9-]*)$")
+DEFAULT_KERNEL_FLAVOURS = ["generic"]
+
+
+def kernel_flavour(name):
+    """Kernel-Typ aus 'uname -r' oder einem Paketnamen (z. B. linux-image-7.0.0-38-generic -> generic)."""
+    m = KERNEL_FLAVOUR_RE.search(name or "")
+    return m.group(1) if m else None
+
+
+def check_kernel(cfg=None):
+    """Prüft Kernel-Typ (nur erlaubte Flavours) und ob für eine vorhandene NVIDIA-Karte das Modul geladen ist."""
+    cfg = cfg or {}
+    allowed = cfg.get("allowed_kernel_flavours") or DEFAULT_KERNEL_FLAVOURS
+    running = os.uname().release
+    flavour = kernel_flavour(running)
+    warnings = []
+
+    running_ok = flavour is None or flavour in allowed
+    if not running_ok:
+        warnings.append(f"Fremd-Kernel läuft: {running} (erlaubt: {', '.join(allowed)})")
+
+    foreign = []
+    try:
+        out = subprocess.run(["dpkg-query", "-W", "-f", "${db:Status-Abbrev}\t${Package}\n"],
+                             capture_output=True, text=True, timeout=15).stdout
+        for line in out.splitlines():
+            status, _, pkg = line.partition("\t")
+            if status.strip() == "ii" and pkg.startswith("linux-"):
+                fl = kernel_flavour(pkg)
+                if fl and fl not in allowed:
+                    foreign.append(pkg)
+    except Exception:
+        pass
+    if foreign:
+        warnings.append(f"Fremd-Kernel installiert: {', '.join(sorted(foreign)[:4])}{' ...' if len(foreign) > 4 else ''}")
+
+    nv = {"hardware": False, "driver_installed": False, "module_loaded": False, "module_package": None}
+    try:
+        lspci = subprocess.run(["lspci", "-n", "-d", "10de:"], capture_output=True, text=True, timeout=10).stdout
+        nv["hardware"] = any((" 0300:" in l or " 0302:" in l) for l in lspci.splitlines())
+    except Exception:
+        pass
+    if nv["hardware"]:
+        try:
+            names = subprocess.run(["dpkg-query", "-W", "-f", "${db:Status-Abbrev}\t${Package}\n"],
+                                   capture_output=True, text=True, timeout=15).stdout.splitlines()
+            installed = [l.partition("\t")[2] for l in names if l.startswith("ii")]
+            nv["driver_installed"] = any(n.startswith(("nvidia-kernel-source-", "nvidia-driver-", "libnvidia-gl-")) for n in installed)
+            mods = [n for n in installed if n.startswith("linux-modules-nvidia-") and n.endswith("-" + running)]
+            nv["module_package"] = mods[0] if mods else None
+            with open("/proc/modules", encoding="utf-8") as f:
+                nv["module_loaded"] = any(l.startswith("nvidia ") for l in f)
+        except Exception:
+            pass
+        if nv["driver_installed"] and not nv["module_loaded"]:
+            hint = "" if nv["module_package"] else f" (Modulpaket linux-modules-nvidia-*-{running} fehlt)"
+            warnings.append(f"NVIDIA-Treiber installiert, aber Modul nicht geladen{hint}")
+
+    return {
+        "running": running,
+        "flavour": flavour,
+        "allowed": allowed,
+        "running_ok": running_ok,
+        "foreign_installed": sorted(foreign),
+        "nvidia": nv,
+        "warnings": warnings,
+        "flagged": len(warnings),
+    }
+
+
+def format_kernel(res):
+    lines = []
+    mark = "OK" if res.get("running_ok") else "!"
+    lines.append(f"[{mark}] Laufender Kernel: {res.get('running')} (Typ {res.get('flavour') or 'unbekannt'}, erlaubt: {', '.join(res.get('allowed', []))})")
+    fi = res.get("foreign_installed", [])
+    fi_txt = ', '.join(fi[:4]) + (f' ... (+{len(fi) - 4})' if len(fi) > 4 else '') if fi else 'keiner'
+    lines.append(f"[{'!' if fi else 'OK'}] Fremd-Kernel installiert: {fi_txt}")
+    nv = res.get("nvidia", {})
+    if nv.get("hardware"):
+        bad = nv.get("driver_installed") and not nv.get("module_loaded")
+        state = "Modul geladen" if nv.get("module_loaded") else ("Treiber installiert, Modul NICHT geladen" if nv.get("driver_installed") else "kein Treiber installiert")
+        lines.append(f"[{'!' if bad else 'OK'}] NVIDIA: {state}")
+    return "\n".join(lines)
+
+
 def run_full_check():
     cfg, cfg_path = load_config()
 
@@ -897,6 +986,7 @@ def run_full_check():
     rk_res = check_rkhunter(cfg)
     lynis_res = check_lynis(cfg)
     logs_res = check_logs(cfg)
+    kernel_res = check_kernel(cfg)
 
     # Determine security alerts
     security_alerts = []
@@ -940,6 +1030,7 @@ def run_full_check():
             "rkhunter": rk_res,
             "lynis": lynis_res,
             "logs": logs_res,
+            "kernel": kernel_res,
         },
         "blocked_snaps": blocked_snaps
     }
@@ -974,6 +1065,10 @@ def main():
         elif cmd == "--logs-text":
             cfg, _ = load_config()
             print(format_logs(check_logs(cfg)))
+            return
+        elif cmd == "--kernel-text":
+            cfg, _ = load_config()
+            print(format_kernel(check_kernel(cfg)))
             return
         elif cmd == "--copy-logs":
             cfg, _ = load_config()
