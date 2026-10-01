@@ -2,12 +2,12 @@
 """
 Selbst-Update der Extension aus den GitHub-Releases (nur Standardbibliothek).
 
-Ablauf: neuestes Release ermitteln -> Tarball + SHA256-Datei von github.com laden
+Ablauf: neuestes Release ermitteln (Redirect von /releases/latest, keine API) -> Tarball + SHA256-Datei von github.com laden
 -> Prüfsumme prüfen -> sicher entpacken -> nach Rückfrage gnomeextension/install.sh ausführen.
 
 Sicherheitsregeln:
   * nur HTTPS, nur github.com/<REPO>/releases/download/<Tag>/ (URLs werden selbst gebaut,
-    nicht aus der API-Antwort übernommen)
+    der Tag stammt aus dem geprüften Redirect-Ziel)
   * Tag muss dem Muster vN[.N...] entsprechen
   * Tarball wird ohne absolute Pfade, '..' und Links entpackt
   * nichts wird ohne ausdrückliche Bestätigung installiert (--yes überspringt sie)
@@ -60,8 +60,20 @@ def local_version():
 
 
 def latest_tag():
-    info = json.loads(_get(f"https://api.github.com/repos/{REPO}/releases/latest", 1024 * 1024))
-    tag = str(info.get("tag_name", ""))
+    """Neuester Release-Tag über den Redirect von /releases/latest (die GitHub-API ist unangemeldet auf 60 Anfragen/Stunde begrenzt)."""
+    url = f"https://github.com/{REPO}/releases/latest"
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "ubuntu-maintenance-selfupdate"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            final = r.geturl()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError("Noch kein Release vorhanden (404).")
+        raise
+    prefix = f"https://github.com/{REPO}/releases/tag/"
+    if not final.startswith(prefix):
+        raise RuntimeError(f"Unerwartete Weiterleitung: {final}")
+    tag = final[len(prefix):]
     if not TAG_RE.match(tag):
         raise RuntimeError(f"Unerwarteter Release-Tag: {tag!r}")
     return tag

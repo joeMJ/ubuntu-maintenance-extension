@@ -1414,7 +1414,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
         }
 
         const terminalCmd = this._settings ? this._settings.get_string('terminal-command') : 'gnome-terminal --';
-        const fullCmd = `${terminalCmd} bash -c "${scriptPath}; exec bash"`;
+        const fullCmd = `${terminalCmd} bash -c "${scriptPath}; echo; read -r -p 'Fertig - Enter zum Schliessen ' _"`;
         try {
             GLib.spawn_command_line_async(fullCmd);
         } catch (e) {
@@ -1479,7 +1479,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
 
     _launchTerminal(command) {
         const terminalCmd = this._settings ? this._settings.get_string('terminal-command') : 'gnome-terminal --';
-        const fullCmd = `${terminalCmd} bash -c "${command}; exec bash"`;
+        const fullCmd = `${terminalCmd} bash -c "${command}; echo; read -r -p 'Fertig - Enter zum Schliessen ' _"`;
         try {
             GLib.spawn_command_line_async(fullCmd);
         } catch (e) {
