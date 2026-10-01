@@ -396,13 +396,35 @@ ensure_kernel_pin() {
     fi
 }
 
+# Ermittelt, welche Pakete ein Kernel-Paket verlangen: nur Pakete, die installiert sind oder im selben
+# (simulierten) Upgrade installiert werden. Nutzt nur Abhängigkeiten (kein Recommends/Suggests).
+kernel_pull_reason() {
+    local sim="$1" pkg="$2" names rd hit
+    names=$( { dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1=="ii"{print $2}'
+               echo "$sim" | awk '/^Inst /{print $2}'; } | LC_ALL=C sort -u)
+    rd=$(LANG=C apt-cache rdepends --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances "$pkg" 2>/dev/null \
+         | sed -n '3,$p' | sed 's/^[ |]*//' | grep -vx "$pkg" | LC_ALL=C sort -u)
+    hit=$(LC_ALL=C comm -12 <(echo "$rd") <(echo "$names") | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    if [ -n "$hit" ]; then
+        echo "verlangt von: $hit"
+    else
+        echo "kein installiertes/mitinstalliertes Paket verlangt ihn direkt (Auswahl durch den apt-Solver, z. B. als Alternative)"
+    fi
+}
+
 show_kernel_guard_warning() {
     local pkgs="$1"
     echo -e "\n${RED}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${RED}║  ⛔  ACHTUNG: FREMD-KERNEL ERKANNT - dist-upgrade ist BLOCKIERT          ║${NC}"
     echo -e "${RED}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
     echo -e "${RED}Das Upgrade würde folgende Kernel-Pakete installieren, die NICHT zu diesem System passen:${NC}"
-    echo -e "${YELLOW}$(echo "$pkgs" | sed 's/^/   • /')${NC}"
+    local p
+    while read -r p; do
+        [ -z "$p" ] && continue
+        echo -e "${YELLOW}   • $p${NC}"
+        echo -e "${CYAN}       ↳ $(kernel_pull_reason "$DIST_SIM_OUTPUT" "$p")${NC}"
+    done <<< "$pkgs"
+    echo -e "${CYAN}   (Weiterforschen: apt-cache rdepends <Paket>  bzw.  apt-get -s dist-upgrade | grep '^Inst linux-')${NC}"
     echo -e "${RED}Erlaubte Kernel-Typen: $ALLOWED_KERNEL_FLAVOURS${NC}"
     echo -e "${RED}Folgen, falls so ein Kernel installiert wird: GRUB bootet ihn wegen der höheren Versionsnummer${NC}"
     echo -e "${RED}als Standard - ohne passende Header (VirtualBox/DKMS) und ohne NVIDIA-Modul (kein Grafiktreiber).${NC}"
