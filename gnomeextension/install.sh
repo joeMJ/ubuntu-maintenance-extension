@@ -82,7 +82,8 @@ install_am_optional() {
     [ -f "$AM_DECLINED_FILE" ] && return 0
     [ -t 0 ] && [ -t 1 ] || return 0
 
-    if dpkg -s appimagelauncher >/dev/null 2>&1; then
+    # 'dpkg -s' meldet Erfolg auch für entfernte Pakete mit Konfigurationsrest (Status 'rc'); nur 'ii' zählt.
+    if [ "$(dpkg-query -W -f='${db:Status-Abbrev}' appimagelauncher 2>/dev/null | cut -c1-2)" = "ii" ]; then
         echo -e "${YELLOW}Hinweis: AppImageLauncher (DEB) ist installiert. AM arbeitet damit nicht zusammen;"
         echo -e "bitte zuerst 'sudo apt remove appimagelauncher' ausführen und neu starten. AM wird übersprungen.${NC}"
         return 0

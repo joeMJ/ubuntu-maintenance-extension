@@ -10,7 +10,7 @@
     "49",
     "50"
   ],
-  "version": 6,
+  "version": 7,
   "url": "https://github.com/joeMJ/ubuntu-maintenance-extension",
   "settings-schema": "org.gnome.shell.extensions.ubuntu-maintenance"
 }
