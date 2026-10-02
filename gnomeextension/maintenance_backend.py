@@ -224,10 +224,14 @@ def check_appimages():
                 entry["latest"] = latest.rsplit("/", 1)[-1]
                 if latest:
                     entry["state"] = "update" if latest != installed else "ok"
+                elif "api.github.com" in line:
+                    # Leere Antwort bei GitHub-Quellen: meist das Anfragelimit der anonymen API (60/h), kein Defekt.
+                    entry["hint"] = "github-api"
         except Exception:
             pass
         result["apps"].append(entry)
     result["count"] = sum(1 for a in result["apps"] if a["state"] == "update")
+    result["unknown"] = sum(1 for a in result["apps"] if a["state"] not in ("update", "ok"))
     return result
 
 def check_gext():

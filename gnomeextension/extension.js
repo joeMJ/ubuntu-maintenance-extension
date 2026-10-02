@@ -598,7 +598,10 @@ export default class UbuntuMaintenanceExtension extends Extension {
                     } else if (a.state === 'ok') {
                         mark = '✓'; color = statusGreen; detail = a.installed;
                     } else {
-                        mark = '?'; color = dimmedColor; detail = 'Prüfung fehlgeschlagen';
+                        mark = '?'; color = dimmedColor;
+                        detail = a.hint === 'github-api'
+                            ? 'nicht prüfbar (GitHub-Anfragelimit, später erneut versuchen)'
+                            : 'Prüfung fehlgeschlagen';
                     }
                     const rowBox = new St.BoxLayout({ vertical: false, style: 'margin-bottom: 3px;' });
                     rowBox.add_child(new St.Label({ text: `${mark} ${a.name}`, style: `color: ${color}; font-size: 11px; font-weight: 600; min-width: 150px;` }));
@@ -1217,8 +1220,8 @@ export default class UbuntuMaintenanceExtension extends Extension {
             const aiRow = this._createInteractiveRow(
                 'package-x-generic-symbolic',
                 'AppImages (AM)',
-                aiCount > 0 ? `{${aiCount} Ausstehend}` : '{Alles aktuell}',
-                aiCount > 0 ? statusOrange : statusGreen,
+                aiCount > 0 ? `{${aiCount} Ausstehend}` : ((appimages.unknown || 0) > 0 ? `{${appimages.unknown} nicht prüfbar}` : '{Alles aktuell}'),
+                aiCount > 0 ? statusOrange : ((appimages.unknown || 0) > 0 ? dimmedColor : statusGreen),
                 textColor,
                 'appimages',
                 isDark
