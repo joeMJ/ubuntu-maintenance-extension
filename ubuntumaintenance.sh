@@ -557,9 +557,31 @@ else
     fi
 fi
 
+# Hinweis und optionale Rückfrage zum GitHub-Token für AM (anonymes API-Limit: 60 Anfragen/Stunde je IP)
+offer_github_token() {
+    echo -e "  ${YELLOW}Hinweis:${NC} GitHub erlaubt ohne Anmeldung nur 60 Anfragen pro Stunde und IP-Adresse (geteilt mit allen Rechnern/Containern hinter derselben IP)."
+    echo "  Ein kostenloser Fine-grained Token erhöht das auf 5000 pro Stunde:"
+    echo "    1. https://github.com/settings/personal-access-tokens/new (Ablaufdatum wählen, 'Repository access' = 'Public repositories (read-only)', keine weiteren Berechtigungen)"
+    echo "    2. am apikey github_pat_..."
+    echo "  AM speichert den Token im Klartext (~/.local/share/AM/ghapikey.txt und in den AM-Updater-Dateien). Er läuft ab und muss dann erneuert werden."
+    ( : </dev/tty ) 2>/dev/null || return 0
+    ask_yes_no "Jetzt einen GitHub-Token für AM eintragen?" || return 0
+    local token
+    echo -n -e "${YELLOW}Token (Eingabe unsichtbar, leer = abbrechen; beim Übergeben an AM kurz in der Prozessliste sichtbar): ${NC}" >&3
+    read -r -s token </dev/tty
+    echo >&3
+    if [ -z "$token" ]; then
+        echo "  Abgebrochen, kein Token eingetragen."
+        return 0
+    fi
+    am apikey "$token"
+    unset token
+}
+
 echo -e "\n${BLUE}[5b/9] Prüfe auf AppImage-Updates (AM)...${NC}"
 if command -v am >/dev/null 2>&1; then
     APPIMAGE_PENDING=()
+    APPIMAGE_RATE_LIMITED=false
     for updater in /opt/*/AM-updater; do
         [ -f "$updater" ] || continue
         app_dir=$(dirname "$updater")
@@ -569,7 +591,10 @@ if command -v am >/dev/null 2>&1; then
         installed=$(cat "$app_dir/version" 2>/dev/null)
         latest=""
         [ -n "$ver_line" ] && latest=$(timeout 30 sh -c "$ver_line; printf '%s' \"\$version\"" 2>/dev/null)
-        if [ -z "$latest" ] || [ -z "$installed" ]; then
+        if [ -z "$latest" ] && [ -n "$installed" ] && echo "$ver_line" | grep -q 'api.github.com'; then
+            echo -e "  ${YELLOW}?${NC} $app_name: nicht prüfbar (vermutlich GitHub-Anfragelimit)"
+            APPIMAGE_RATE_LIMITED=true
+        elif [ -z "$latest" ] || [ -z "$installed" ]; then
             echo -e "  ${YELLOW}?${NC} $app_name: Prüfung fehlgeschlagen"
         elif [ "$latest" != "$installed" ]; then
             echo -e "  ${YELLOW}↑${NC} $app_name: ${installed##*/} → ${latest##*/}"
@@ -578,6 +603,10 @@ if command -v am >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} $app_name: ${installed##*/}"
         fi
     done
+
+    if [ "$APPIMAGE_RATE_LIMITED" = true ] && [ ! -f "${XDG_DATA_HOME:-$HOME/.local/share}/AM/ghapikey.txt" ]; then
+        offer_github_token
+    fi
 
     if [ ${#APPIMAGE_PENDING[@]} -eq 0 ]; then
         echo "Keine AppImage-Updates verfügbar."

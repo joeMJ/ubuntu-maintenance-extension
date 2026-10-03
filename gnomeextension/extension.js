@@ -243,7 +243,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
         }
     }
 
-    _triggerCheck() {
+    _triggerCheck(forceAppimages = false) {
         if (this._isChecking) return;
         this._isChecking = true;
 
@@ -252,10 +252,14 @@ export default class UbuntuMaintenanceExtension extends Extension {
         }
 
         try {
-            const proc = Gio.Subprocess.new(
-                ['/usr/bin/python3', this._backendScript],
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-            );
+            // Intervall und Force-Flag der AppImage-Prüfung (Cache im Backend) per Umgebung übergeben
+            const launcher = new Gio.SubprocessLauncher({
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+            });
+            const aiHours = this._settings ? this._settings.get_int('appimage-check-interval-hours') : 24;
+            launcher.setenv('UM_APPIMAGE_INTERVAL_HOURS', String(aiHours), true);
+            launcher.setenv('UM_APPIMAGE_FORCE', forceAppimages ? '1' : '0', true);
+            const proc = launcher.spawnv(['/usr/bin/python3', this._backendScript]);
 
             proc.communicate_utf8_async(null, null, (source, res) => {
                 this._isChecking = false;
@@ -600,7 +604,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
                     } else {
                         mark = '?'; color = dimmedColor;
                         detail = a.hint === 'github-api'
-                            ? 'nicht prüfbar (GitHub-Anfragelimit, später erneut versuchen)'
+                            ? 'nicht prüfbar (GitHub-Anfragelimit; wird nach 1 h erneut versucht, Abhilfe: GitHub-Token per „am apikey“, siehe Einstellungen)'
                             : 'Prüfung fehlgeschlagen';
                     }
                     const rowBox = new St.BoxLayout({ vertical: false, style: 'margin-bottom: 3px;' });
@@ -610,6 +614,10 @@ export default class UbuntuMaintenanceExtension extends Extension {
                     rowBox.add_child(d);
                     listContainer.add_child(rowBox);
                 });
+                if (ai.checked_at) {
+                    const when = GLib.DateTime.new_from_unix_local(ai.checked_at).format('%d.%m. %H:%M');
+                    listContainer.add_child(new St.Label({ text: `Stand: ${when} (Prüfintervall ${ai.interval_hours} h, Menüeintrag „AppImages jetzt prüfen“ erzwingt eine neue Abfrage)`, style: `color: ${dimmedColor}; font-size: 10px; margin-top: 8px;` }));
+                }
                 if ((ai.count || 0) > 0) {
                     listContainer.add_child(new St.Label({ text: 'Aktualisieren: Menüeintrag „AppImages aktualisieren“ unten im Hauptmenü.', style: `color: ${dimmedColor}; font-size: 10px; margin-top: 8px;` }));
                 }
@@ -1275,6 +1283,15 @@ export default class UbuntuMaintenanceExtension extends Extension {
             );
             aiItem.connect('activate', () => this._launchTerminal('am -u'));
             menu.addMenuItem(aiItem);
+        }
+
+        if (appimages.available) {
+            const aiCheckItem = new PopupMenu.PopupImageMenuItem(
+                'AppImages jetzt prüfen',
+                'system-search-symbolic'
+            );
+            aiCheckItem.connect('activate', () => this._triggerCheck(true));
+            menu.addMenuItem(aiCheckItem);
         }
 
         if (gext.available && gext.broken) {

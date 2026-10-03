@@ -16,6 +16,8 @@ Native GNOME Shell Extension für Ubuntu 24.04+ (kompatibel mit GNOME 45, 46, 47
 
 Überwacht den System- und Sicherheitszustand direkt in der GNOME Top-Bar und bietet eine moderne, modulare Kachel-Ansicht (Card-Look) nach dem Vorbild des *snmpbar* Design-Templates.
 
+![Dropdown-Menü mit Kacheln für Sicherheit und System-Updates sowie Flyover-Sidecar](gnomeextension/screenshots/menu.webp)
+
 ---
 
 ## 🌟 Features
@@ -43,7 +45,7 @@ Native GNOME Shell Extension für Ubuntu 24.04+ (kompatibel mit GNOME 45, 46, 47
     * Snap-Updates mit Konflikterkennung (z. B. laufendes Spotify/CUPS mit Beenden-Button).
     * Flatpak-Updates.
     * GNOME-Extensions-Updates über `gext` (Dry-Run `gext update -n`, nur sichtbar wenn `gext` vorhanden ist); bei defektem `gext` (z. B. pipx nach Python-Sprung) Hinweis mit Reparatur-Button (`pipx reinstall gnome-extensions-cli`).
-    * AppImage-Updates über AM (nur sichtbar, wenn `am` installiert ist): Versionsvergleich `/opt/<app>/version` gegen die aktuelle Quelle, rein lesend; Aktualisierung per Button im Terminal (`am -u`).
+    * AppImage-Updates über AM (nur sichtbar, wenn `am` installiert ist): Versionsvergleich `/opt/<app>/version` gegen die aktuelle Quelle, Aktualisierung per Menüeintrag im Terminal (`am -u`). Das Ergebnis wird zwischengespeichert (Standard: 1× täglich, einstellbar stündlich bis wöchentlich; Menüeintrag „AppImages jetzt prüfen“ erzwingt eine neue Abfrage).
     * Hinweis auf anstehenden Kernel-/Systemneustart (`/var/run/reboot-required`).
   * **Wartungsaktionen**:
     * 🚀 Starten des interaktiven Wartungsskripts `ubuntumaintenance.sh` im konfigurierten Terminal.
@@ -93,6 +95,15 @@ cd gnomeextension
 `version` in `gnomeextension/metadata.json` erhöhen, committen, dann `git tag vN && git push origin vN`. Der Workflow `.github/workflows/release.yml` baut Archiv und Prüfsumme und legt das Release an.
 
 ---
+
+### GitHub-Anfragelimit der AppImage-Prüfung
+
+Für Apps mit GitHub-Quelle fragt AM die GitHub-API ab. Ohne Anmeldung erlaubt GitHub nur 60 Anfragen pro Stunde und IP-Adresse (geteilt mit allen Rechnern und Containern hinter derselben IP). Betroffene Apps erscheinen dann als „nicht prüfbar“; der Zwischenspeicher und das einstellbare Prüfintervall verringern die Zahl der Anfragen. Zusätzlich kann AM einen kostenlosen GitHub-Token nutzen (5000 Anfragen pro Stunde):
+
+1. Auf GitHub einen *Fine-grained personal access token* erzeugen: Ablaufdatum wählen, „Repository access“ = „Public repositories (read-only)“, keine weiteren Berechtigungen.
+2. Im Terminal eintragen: `am apikey github_pat_…` (das Wartungsskript fragt bei erkanntem Limit danach).
+
+AM speichert den Token im Klartext (`~/.local/share/AM/ghapikey.txt` und in den AM-Updater-Dateien unter `/opt`). Die Extension selbst speichert keinen Token. Er läuft ab und muss dann erneuert werden. Den Token nie weitergeben oder in ein Repository legen.
 
 ### Optional: AM (AppImage-Manager)
 

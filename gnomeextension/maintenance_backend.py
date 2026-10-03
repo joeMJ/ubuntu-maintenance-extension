@@ -12,6 +12,7 @@ import json
 import glob
 import shutil
 import subprocess
+import time
 from datetime import datetime
 
 DEFAULT_CONFIG_PATHS = [
@@ -193,16 +194,60 @@ def check_flatpak():
         pass
     return result
 
-def check_appimages():
-    """AM-verwaltete AppImages (/opt/<app>): installierte vs. aktuelle Quelle. Rein lesend.
+APPIMAGE_CACHE_FILE = os.path.expanduser("~/.local/state/ubuntu-maintenance-indicator/appimage_cache.json")
+APPIMAGE_RETRY_SECONDS = 3600  # nicht prüfbare Apps (z. B. API-Limit) werden frühestens nach 1 h erneut abgefragt
+
+
+def _appimage_interval_seconds():
+    """Prüfintervall der AppImage-Abfrage (Umgebungsvariable der Extension, Standard 24 h)."""
+    try:
+        hours = int(os.environ.get("UM_APPIMAGE_INTERVAL_HOURS", "24"))
+    except ValueError:
+        hours = 24
+    return max(1, min(hours, 24 * 30)) * 3600
+
+
+def _load_appimage_cache():
+    try:
+        with open(APPIMAGE_CACHE_FILE) as f:
+            data = json.load(f)
+        return data.get("apps", {}) if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_appimage_cache(apps):
+    try:
+        os.makedirs(os.path.dirname(APPIMAGE_CACHE_FILE), exist_ok=True)
+        tmp = APPIMAGE_CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"apps": apps}, f)
+        os.replace(tmp, APPIMAGE_CACHE_FILE)
+    except Exception:
+        pass
+
+
+def check_appimages(force=None):
+    """AM-verwaltete AppImages (/opt/<app>): installierte vs. aktuelle Quelle. Installiert nichts.
 
     Nutzt die Zeile 'version=...' aus dem AM-Updater der jeweiligen App (ermittelt die aktuelle
-    Download-URL) und vergleicht sie mit /opt/<app>/version. Es wird nichts installiert.
+    Download-URL, bei GitHub-Quellen per api.github.com) und vergleicht sie mit /opt/<app>/version.
+    Das GitHub-Limit ohne Token liegt bei 60 Anfragen/Stunde je IP, daher wird je App zwischengespeichert:
+    Ein Ergebnis gilt, bis das Prüfintervall (UM_APPIMAGE_INTERVAL_HOURS, Standard 24 h) abgelaufen ist
+    oder sich die installierte Version ändert. Nicht prüfbare Apps werden nach 1 h erneut versucht.
+    force=True (oder UM_APPIMAGE_FORCE=1) ignoriert den Cache.
     """
     result = {"available": False, "count": 0, "apps": []}
     if not shutil.which("am"):
         return result
     result["available"] = True
+    if force is None:
+        force = os.environ.get("UM_APPIMAGE_FORCE") == "1"
+    interval = _appimage_interval_seconds()
+    now = int(time.time())
+    cache = _load_appimage_cache()
+    new_cache = {}
+    oldest = now
     for updater in sorted(glob.glob("/opt/*/AM-updater")):
         base = os.path.dirname(updater)
         name = os.path.basename(base)
@@ -213,6 +258,17 @@ def check_appimages():
             with open(updater) as f:
                 lines = f.read().splitlines()
             line = next((l for l in lines[:12] if l.startswith("version=")), None)
+            hit = cache.get(name)
+            if (not force and isinstance(hit, dict) and hit.get("installed") == installed
+                    and isinstance(hit.get("entry"), dict)):
+                age = now - int(hit.get("checked", 0))
+                ttl = interval if hit["entry"].get("state") in ("ok", "update") else min(interval, APPIMAGE_RETRY_SECONDS)
+                if 0 <= age < ttl:
+                    entry = hit["entry"]
+                    new_cache[name] = hit
+                    oldest = min(oldest, int(hit.get("checked", now)))
+                    result["apps"].append(entry)
+                    continue
             if line:
                 res = subprocess.run(
                     ["sh", "-c", line + '; printf "%s" "$version"'],
@@ -227,11 +283,15 @@ def check_appimages():
                 elif "api.github.com" in line:
                     # Leere Antwort bei GitHub-Quellen: meist das Anfragelimit der anonymen API (60/h), kein Defekt.
                     entry["hint"] = "github-api"
+                new_cache[name] = {"checked": now, "installed": installed, "entry": entry}
         except Exception:
             pass
         result["apps"].append(entry)
+    _save_appimage_cache(new_cache)
     result["count"] = sum(1 for a in result["apps"] if a["state"] == "update")
     result["unknown"] = sum(1 for a in result["apps"] if a["state"] not in ("update", "ok"))
+    result["checked_at"] = oldest
+    result["interval_hours"] = interval // 3600
     return result
 
 def check_gext():

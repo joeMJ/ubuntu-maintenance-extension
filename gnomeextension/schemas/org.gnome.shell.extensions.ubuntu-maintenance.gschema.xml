@@ -21,6 +21,13 @@
       <description>Intervall für die Hintergrundprüfung des System- und Sicherheitsstatus.</description>
     </key>
 
+    <key name="appimage-check-interval-hours" type="i">
+      <range min="1" max="720"/>
+      <default>24</default>
+      <summary>Prüfintervall für AppImages (Stunden)</summary>
+      <description>Wie oft die AppImage-Prüfung (AM) die Update-Quellen abfragt. Zwischendurch wird das gespeicherte Ergebnis angezeigt. Ohne GitHub-Token erlaubt GitHub nur 60 Anfragen pro Stunde und IP-Adresse.</description>
+    </key>
+
     <key name="notify-on-updates" type="b">
       <default>true</default>
       <summary>Benachrichtigung bei Updates</summary>

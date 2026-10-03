@@ -101,6 +101,64 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
         settings.bind('notify-on-alert', notifyAlertRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         groupNotify.add(notifyAlertRow);
 
+        // Gruppe 3: AppImages (AM) und GitHub-Anfragelimit
+        const groupAppImage = new Adw.PreferencesGroup({
+            title: 'AppImages (AM) & GitHub-Anfragelimit',
+            description: 'Die AppImage-Prüfung fragt bei Apps mit GitHub-Quelle die GitHub-API ab. Ohne Anmeldung erlaubt GitHub nur ' +
+                '60 Anfragen pro Stunde und IP-Adresse; alle Rechner und Container hinter derselben IP teilen sich dieses Limit.',
+        });
+        pageDisplay.add(groupAppImage);
+
+        const aiIntervals = [1, 6, 24, 168];
+        const aiIntervalRow = new Adw.ComboRow({
+            title: 'Prüfintervall für AppImages',
+            subtitle: 'Empfohlen: täglich. Neu prüfen: Menü „AppImages jetzt prüfen“.',
+            model: new Gtk.StringList({
+                strings: ['Stündlich', '6 Stunden', 'Täglich', 'Wöchentlich'],
+            }),
+        });
+        const curAi = settings.get_int('appimage-check-interval-hours');
+        let aiIdx = aiIntervals.findIndex(h => h >= curAi);
+        aiIntervalRow.selected = aiIdx < 0 ? aiIntervals.length - 1 : aiIdx;
+        aiIntervalRow.connect('notify::selected', () => {
+            settings.set_int('appimage-check-interval-hours', aiIntervals[aiIntervalRow.selected]);
+        });
+        groupAppImage.add(aiIntervalRow);
+
+        const tokenTitleRow = new Adw.ActionRow({
+            title: 'GitHub-Token für AM (optional)',
+            subtitle: 'Erhöht das Limit von 60 auf 5000 Anfragen pro Stunde',
+        });
+        tokenTitleRow.add_suffix(new Gtk.LinkButton({
+            label: 'Token erzeugen',
+            uri: 'https://github.com/settings/personal-access-tokens/new',
+            valign: Gtk.Align.CENTER,
+        }));
+        groupAppImage.add(tokenTitleRow);
+
+        // Anleitung als eigene Zeile über die volle Breite, normaler Textkontrast (Untertitel sind klein und gedimmt)
+        const tokenHelp = new Gtk.Label({
+            use_markup: true,
+            wrap: true,
+            xalign: 0,
+            hexpand: true,
+            selectable: true,
+            margin_top: 12,
+            margin_bottom: 12,
+            margin_start: 14,
+            margin_end: 14,
+            label:
+                '<b>So geht es:</b>\n' +
+                '1. Auf GitHub einen <i>Fine-grained personal access token</i> erzeugen: Ablaufdatum wählen (je kürzer, desto sicherer), ' +
+                '„Repository access“ = „Public repositories (read-only)“, keine weiteren Berechtigungen.\n' +
+                '2. Im Terminal eintragen:  <tt>am apikey github_pat_…</tt>\n' +
+                '3. Einmal <tt>am -u</tt> ausführen, damit AM den Token in die Updater übernimmt.\n\n' +
+                '<b>Wichtig:</b> Den Token speichert AM selbst im Klartext (<tt>~/.local/share/AM/ghapikey.txt</tt> und in den ' +
+                'AM-Updater-Dateien unter <tt>/opt</tt>); diese Extension speichert ihn nicht. Er läuft ab und muss dann erneuert ' +
+                'werden (<tt>am apikey del</tt>, danach neu eintragen). Den Token nie weitergeben oder in ein Repository legen.',
+        });
+        groupAppImage.add(new Adw.PreferencesRow({ child: tokenHelp, activatable: false, focusable: false }));
+
         // ==========================================
         // Seite 2: Git-Updates & Repository
         // ==========================================
