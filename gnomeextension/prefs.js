@@ -103,7 +103,7 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
 
         // Gruppe 3: AppImages (AM) und GitHub-Anfragelimit
         const groupAppImage = new Adw.PreferencesGroup({
-            title: 'AppImages (AM) & GitHub-Anfragelimit',
+            title: 'AppImages (AM) und GitHub-Anfragelimit',
             description: 'Die AppImage-Prüfung fragt bei Apps mit GitHub-Quelle die GitHub-API ab. Ohne Anmeldung erlaubt GitHub nur ' +
                 '60 Anfragen pro Stunde und IP-Adresse; alle Rechner und Container hinter derselben IP teilen sich dieses Limit.',
         });
@@ -169,7 +169,7 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
         window.add(pageUpdate);
 
         const groupUpdate = new Adw.PreferencesGroup({
-            title: 'Extension Versionsprüfung & Quelle',
+            title: 'Extension-Versionsprüfung und Quelle',
             description: 'Automatische Aktualitätsprüfung über das Git-Repository (GitHub / Gitea)',
         });
         pageUpdate.add(groupUpdate);

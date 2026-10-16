@@ -365,7 +365,7 @@ LOG_CATEGORIES = [
      r"Hardware Error|mce: |Machine check|PCIe Bus Error|AER: (Corrected|Uncorrected|Multiple)|pcieport.*(Uncorrected|Corrected error)"
      r"|temperature above threshold|cpu clock throttled|critical temperature|thermal.*throttl"),
     ("crash", "Abstürze", "warn",
-     r"segfault at|general protection fault|traps: .*(trap|general protection)|dumped core|kernel BUG|Oops:"),
+     r"segfault at|general protection fault|traps: .*(trap|general protection)|dumped core|kernel BUG at|Oops:"),
     ("apparmor", "AppArmor", "info", r'apparmor="DENIED"'),
 ]
 
