@@ -193,10 +193,11 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
         settings.bind('git-raw-metadata-url', gitRawUrlRow, 'text', Gio.SettingsBindFlags.DEFAULT);
         groupUpdate.add(gitRawUrlRow);
 
-        // Versions-Status und Manueller Prüf-Button
+        // Versions-Status, manueller Prüf-Button und Update-Button
+        const defaultSubtitle = 'Neue Versionen werden hier angezeigt; Installation per Button, Menü-Eintrag (selfupdate.py) oder install-remote.sh';
         const infoRow = new Adw.ActionRow({
             title: `Installierte Version: v${currentVersion}`,
-            subtitle: 'Aktualisierung über den Update-Eintrag im Menü (selfupdate.py) oder per install-remote.sh',
+            subtitle: defaultSubtitle,
         });
 
         const checkBtn = new Gtk.Button({
@@ -205,27 +206,58 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
             css_classes: ['suggested-action'],
         });
 
-        checkBtn.connect('clicked', async () => {
+        // Update-Button: erscheint nur, wenn eine neuere Version gefunden wurde
+        const updateBtn = new Gtk.Button({
+            label: 'Update installieren',
+            valign: Gtk.Align.CENTER,
+            visible: false,
+        });
+
+        updateBtn.connect('clicked', () => {
+            // Wie der Menü-Banner: selfupdate.py im konfigurierten Terminal (Download, SHA256-Prüfung, Rückfrage [j/N])
+            const terminalCmd = settings.get_string('terminal-command') || 'gnome-terminal --';
+            const script = GLib.build_filenamev([this.path, 'selfupdate.py']);
+            const hold = "echo; read -r -p 'Fertig - Enter zum Schliessen ' _";
+            try {
+                GLib.spawn_command_line_async(`${terminalCmd} bash -c "python3 '${script}'; ${hold}"`);
+            } catch (err) {
+                infoRow.subtitle = `Terminal konnte nicht gestartet werden: ${err.message}`;
+            }
+        });
+
+        const runCheck = async (silent) => {
             checkBtn.sensitive = false;
-            infoRow.subtitle = 'Prüfe Version auf Remote-Server...';
+            if (!silent) infoRow.subtitle = 'Prüfe Version auf Remote-Server...';
             try {
                 const rawUrl = settings.get_string('git-raw-metadata-url');
                 const res = await updateChecker.checkForUpdates(rawUrl);
                 if (res.updateAvailable) {
-                    infoRow.subtitle = `Update verfügbar: v${res.remoteVersion} (Aktuell: v${currentVersion})! Nutze den Update-Eintrag im Menü oder starte selfupdate.py.`;
-                } else if (res.error) {
-                    infoRow.subtitle = `Prüfung fehlgeschlagen: ${res.error}`;
-                } else {
-                    infoRow.subtitle = `Die Extension ist auf dem neuesten Stand (v${currentVersion}).`;
+                    infoRow.subtitle = `Update verfügbar: v${res.remoteVersion} (Aktuell: v${currentVersion}). Der Button öffnet ein Terminal mit selfupdate.py (SHA256-Prüfung, Rückfrage vor der Installation).`;
+                    updateBtn.label = `Update auf v${res.remoteVersion} installieren`;
+                    updateBtn.visible = true;
+                    updateBtn.add_css_class('suggested-action');
+                    checkBtn.remove_css_class('suggested-action');
+                } else if (!silent) {
+                    updateBtn.visible = false;
+                    infoRow.subtitle = res.error
+                        ? `Prüfung fehlgeschlagen: ${res.error}`
+                        : `Die Extension ist auf dem neuesten Stand (v${currentVersion}).`;
                 }
             } catch (err) {
-                infoRow.subtitle = `Fehler: ${err.message}`;
+                if (!silent) infoRow.subtitle = `Fehler: ${err.message}`;
             } finally {
                 checkBtn.sensitive = true;
             }
-        });
+        };
 
+        checkBtn.connect('clicked', () => runCheck(false));
+
+        infoRow.add_suffix(updateBtn);
         infoRow.add_suffix(checkBtn);
         groupUpdate.add(infoRow);
+
+        // Beim Öffnen des Fensters still prüfen (nur wenn die automatische Prüfung aktiv ist)
+        if (settings.get_boolean('update-check-enabled'))
+            runCheck(true);
     }
 }
