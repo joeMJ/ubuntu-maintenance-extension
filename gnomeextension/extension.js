@@ -605,7 +605,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
                         mark = '?'; color = dimmedColor;
                         detail = a.hint === 'github-api'
                             ? 'nicht prüfbar (GitHub-Anfragelimit; wird nach 1 h erneut versucht, Abhilfe: GitHub-Token per „am apikey“, siehe Einstellungen)'
-                            : 'Prüfung fehlgeschlagen';
+                            : (a.hint === 'no-version' ? 'nicht prüfbar (der Updater lieferte keine Version)' : 'Prüfung fehlgeschlagen');
                     }
                     const rowBox = new St.BoxLayout({ vertical: false, style: 'margin-bottom: 3px;' });
                     rowBox.add_child(new St.Label({ text: `${mark} ${a.name}`, style: `color: ${color}; font-size: 11px; font-weight: 600; min-width: 150px;` }));

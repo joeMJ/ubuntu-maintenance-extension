@@ -13,6 +13,7 @@ import glob
 import shutil
 import subprocess
 import time
+import urllib.request
 from datetime import datetime
 
 DEFAULT_CONFIG_PATHS = [
@@ -227,6 +228,47 @@ def _save_appimage_cache(apps):
         pass
 
 
+# Zeilen vor 'version=' im AM-Updater, die wir mit ausführen dürfen (Variablen wie SITE/ARCH_FILTER, die die
+# version=-Zeile benutzt). Alles andere (curl, rm, mv, Befehlsersetzung ...) führt zum bisherigen Verhalten:
+# nur die version=-Zeile selbst.
+_APPIMAGE_PREAMBLE_OK = [
+    re.compile(r"^$"),
+    re.compile(r"^#"),
+    re.compile(r"^set -u$"),
+    re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@+-]*$"),
+    re.compile(r'^[A-Za-z_][A-Za-z0-9_]*="[A-Za-z0-9_./:@+ -]*"$'),
+    re.compile(r"^ARCH=\$\(uname -m\)$"),
+    re.compile(r'^case "\$ARCH" in$'),
+    re.compile(r'^[A-Za-z0-9_|*]+\) +[A-Za-z_][A-Za-z0-9_]*="[A-Za-z0-9_.-]*" *;;$'),
+    re.compile(r'^\*\) echo "Unsupported architecture: \$ARCH" && exit 1 ;;$'),
+    re.compile(r"^esac$"),
+]
+
+
+def _appimage_preamble(lines, idx):
+    """Harmlose Zeilen vor der version=-Zeile als Text, oder None, wenn eine Zeile nicht sicher einzuordnen ist."""
+    out = []
+    for l in lines[:idx]:
+        t = l.strip()
+        if t.startswith("version0="):
+            continue  # liest nur die installierte Version, wird für die Abfrage nicht gebraucht
+        if not any(p.match(t) for p in _APPIMAGE_PREAMBLE_OK):
+            return None
+        out.append(l)
+    return "\n".join(out)
+
+
+def _github_anonymous_limit_reached():
+    """True, wenn das anonyme GitHub-API-Limit dieser IP erschöpft ist. /rate_limit zählt selbst nicht mit."""
+    try:
+        req = urllib.request.Request("https://api.github.com/rate_limit",
+                                     headers={"User-Agent": "ubuntu-maintenance-indicator"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.load(r)["resources"]["core"]["remaining"] == 0
+    except Exception:
+        return False
+
+
 def check_appimages(force=None):
     """AM-verwaltete AppImages (/opt/<app>): installierte vs. aktuelle Quelle. Installiert nichts.
 
@@ -248,6 +290,7 @@ def check_appimages(force=None):
     cache = _load_appimage_cache()
     new_cache = {}
     oldest = now
+    _rl_memo = {}
     for updater in sorted(glob.glob("/opt/*/AM-updater")):
         base = os.path.dirname(updater)
         name = os.path.basename(base)
@@ -258,6 +301,7 @@ def check_appimages(force=None):
             with open(updater) as f:
                 lines = f.read().splitlines()
             line = next((l for l in lines[:12] if l.startswith("version=")), None)
+            preamble = _appimage_preamble(lines, lines.index(line)) if line else None
             hit = cache.get(name)
             if (not force and isinstance(hit, dict) and hit.get("installed") == installed
                     and isinstance(hit.get("entry"), dict)):
@@ -270,8 +314,9 @@ def check_appimages(force=None):
                     result["apps"].append(entry)
                     continue
             if line:
+                script = (preamble + "\n" if preamble else "") + line + '; printf "%s" "$version"'
                 res = subprocess.run(
-                    ["sh", "-c", line + '; printf "%s" "$version"'],
+                    ["sh", "-c", script],
                     capture_output=True, text=True, timeout=30,
                     env=dict(os.environ, LANG="C.UTF-8")
                 )
@@ -281,8 +326,10 @@ def check_appimages(force=None):
                 if latest:
                     entry["state"] = "update" if latest != installed else "ok"
                 elif "api.github.com" in line:
-                    # Leere Antwort bei GitHub-Quellen: meist das Anfragelimit der anonymen API (60/h), kein Defekt.
-                    entry["hint"] = "github-api"
+                    # Leere Antwort bei einer GitHub-Quelle: nur dann 'Anfragelimit', wenn es wirklich erschöpft ist.
+                    if "limit" not in _rl_memo:
+                        _rl_memo["limit"] = _github_anonymous_limit_reached()
+                    entry["hint"] = "github-api" if ("Authorization" not in line and _rl_memo["limit"]) else "no-version"
                 new_cache[name] = {"checked": now, "installed": installed, "entry": entry}
         except Exception:
             pass

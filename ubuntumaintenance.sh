@@ -578,6 +578,36 @@ offer_github_token() {
     unset token
 }
 
+# AppImage-Versionsermittlung: Die 'version='-Zeile des AM-Updaters benutzt Variablen aus Zeilen DAVOR
+# (SITE=, ARCH_FILTER ...). Diese Zeilen werden mit ausgeführt, aber nur wenn sie harmlos sind
+# (gleiche Positivliste wie check_appimages() im Backend der Extension - beide Stellen gemeinsam pflegen).
+APPIMAGE_SAFE_PREAMBLE_RE='^[[:space:]]*(|#.*|set -u|[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@+-]*|[A-Za-z_][A-Za-z0-9_]*="[A-Za-z0-9_./:@+ -]*"|ARCH=\$\(uname -m\)|case "\$ARCH" in|[A-Za-z0-9_|*]+\) +[A-Za-z_][A-Za-z0-9_]*="[A-Za-z0-9_.-]*" *;;|\*\) echo "Unsupported architecture: \$ARCH" && exit 1 ;;|esac)[[:space:]]*$'
+
+appimage_latest() {
+    local updater="$1" head12 ver_line idx pre
+    head12=$(head -n 12 "$updater")
+    ver_line=$(printf '%s\n' "$head12" | grep -m1 '^version=')
+    [ -n "$ver_line" ] || return 0
+    idx=$(printf '%s\n' "$head12" | grep -n -m1 '^version=' | cut -d: -f1)
+    pre=$(printf '%s\n' "$head12" | head -n $((idx - 1)) | grep -v '^version0=')
+    # Enthält eine Zeile davor etwas Unbekanntes, bleibt es beim alten Verhalten (nur die version=-Zeile).
+    if [ -n "$pre" ] && printf '%s\n' "$pre" | grep -qvE "$APPIMAGE_SAFE_PREAMBLE_RE"; then
+        pre=""
+    fi
+    timeout 30 sh -c "${pre}
+${ver_line}; printf '%s' \"\$version\"" 2>/dev/null
+}
+
+# Wahr nur, wenn das anonyme GitHub-API-Limit dieser IP wirklich erschöpft ist (/rate_limit zählt selbst nicht mit).
+github_limit_reached() {
+    if [ -z "${_GH_LIMIT_REMAINING:-}" ]; then
+        _GH_LIMIT_REMAINING=$(curl -fsS --max-time 10 https://api.github.com/rate_limit 2>/dev/null | tr -d ' \n' \
+            | grep -o '"core":{[^}]*}' | grep -o '"remaining":[0-9]*' | cut -d: -f2)
+        _GH_LIMIT_REMAINING="${_GH_LIMIT_REMAINING:-?}"
+    fi
+    [ "$_GH_LIMIT_REMAINING" = "0" ]
+}
+
 echo -e "\n${BLUE}[5b/9] Prüfe auf AppImage-Updates (AM)...${NC}"
 if command -v am >/dev/null 2>&1; then
     APPIMAGE_PENDING=()
@@ -589,11 +619,14 @@ if command -v am >/dev/null 2>&1; then
         # Zeile 'version=...' des AM-Updaters ermittelt die aktuelle Download-URL (rein lesend)
         ver_line=$(head -n 12 "$updater" | grep -m1 '^version=')
         installed=$(cat "$app_dir/version" 2>/dev/null)
-        latest=""
-        [ -n "$ver_line" ] && latest=$(timeout 30 sh -c "$ver_line; printf '%s' \"\$version\"" 2>/dev/null)
+        latest=$(appimage_latest "$updater")
         if [ -z "$latest" ] && [ -n "$installed" ] && echo "$ver_line" | grep -q 'api.github.com'; then
-            echo -e "  ${YELLOW}?${NC} $app_name: nicht prüfbar (vermutlich GitHub-Anfragelimit)"
-            APPIMAGE_RATE_LIMITED=true
+            if ! echo "$ver_line" | grep -q 'Authorization' && github_limit_reached; then
+                echo -e "  ${YELLOW}?${NC} $app_name: nicht prüfbar (GitHub-Anfragelimit erreicht)"
+                APPIMAGE_RATE_LIMITED=true
+            else
+                echo -e "  ${YELLOW}?${NC} $app_name: nicht prüfbar (der Updater lieferte keine Version)"
+            fi
         elif [ -z "$latest" ] || [ -z "$installed" ]; then
             echo -e "  ${YELLOW}?${NC} $app_name: Prüfung fehlgeschlagen"
         elif [ "$latest" != "$installed" ]; then
