@@ -72,6 +72,21 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
         settings.bind('refresh-interval-minutes', intervalRow, 'value', Gio.SettingsBindFlags.DEFAULT);
         groupPanel.add(intervalRow);
 
+        // Wartezeit nach Anmeldung/Entsperren, bevor die erste Prüfung startet
+        const startupRow = new Adw.SpinRow({
+            title: 'Wartezeit nach Anmeldung/Entsperren (Sekunden)',
+            subtitle: 'Die erste Prüfung startet erst danach und wenn der Rechner ruhig ist (0 = sofort)',
+            adjustment: new Gtk.Adjustment({
+                lower: 0,
+                upper: 1800,
+                step_increment: 30,
+                page_increment: 60,
+                value: settings.get_int('startup-delay-seconds'),
+            }),
+        });
+        settings.bind('startup-delay-seconds', startupRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+        groupPanel.add(startupRow);
+
         // Terminal-Befehl
         const terminalRow = new Adw.EntryRow({
             title: 'Terminal-Befehl für Wartungsläufe',

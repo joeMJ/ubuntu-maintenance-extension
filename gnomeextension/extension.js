@@ -15,6 +15,7 @@ import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import GObject from 'gi://GObject';
 import { UpdateChecker } from './updater.js';
+import { firstCheckDelay, isCalm, readTextFile, cachePath, loadCache, saveCache, CALM_RETRY_SECONDS, CALM_MAX_RETRIES } from './startup.js';
 
 // ==============================================================================
 // Indicator Button Klasse (Zero-Jitter Top-Bar)
@@ -89,6 +90,9 @@ export default class UbuntuMaintenanceExtension extends Extension {
 
         this._timeoutId = null;
         this._gitUpdateTimeoutId = null;
+        this._startupTimeoutId = null;
+        this._startupDone = false;
+        this._cacheFile = cachePath();
         this._sidecarHideTimeout = null;
         this._hoverSidecar = null;
         this._isChecking = false;
@@ -115,22 +119,23 @@ export default class UbuntuMaintenanceExtension extends Extension {
             if (key === 'panel-position') {
                 this._repositionIndicator();
             } else if (key === 'refresh-interval-minutes') {
-                this._rescheduleTimer();
+                if (this._startupDone) this._rescheduleTimer();
             }
         });
 
-        // Erste Prüfung starten
-        this._triggerCheck();
-        this._rescheduleTimer();
-
-        // Git-Update Check starten falls aktiv
-        if (this._settings.get_boolean('update-check-enabled')) {
-            this._checkExtensionUpdate();
-            this._gitUpdateTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 21600, () => {
-                this._checkExtensionUpdate();
-                return GLib.SOURCE_CONTINUE;
-            });
+        // enable() läuft bei jeder Anmeldung und jedem Entsperren. Deshalb: Menü sofort aus dem Zwischenspeicher der
+        // letzten Prüfung aufbauen und die erste Prüfung verzögert und erst bei Ruhe starten (siehe startup.js).
+        const cached = loadCache(this._cacheFile);
+        if (cached) {
+            try {
+                this._applyCachedResults(cached.data);
+            } catch (e) {
+                console.warn(`[ubuntu-maintenance] Zwischenspeicher nicht angezeigt: ${e.message}`);
+            }
         }
+        const intervalSec = Math.max(300, this._settings.get_int('refresh-interval-minutes') * 60);
+        const startupDelay = this._settings.get_int('startup-delay-seconds');
+        this._scheduleStartupCheck(firstCheckDelay(cached ? cached.ageSec : null, intervalSec, startupDelay));
 
         console.log(`[ubuntu-maintenance] Extension ${this.uuid} aktiviert (v${this._currentVersion}).`);
     }
@@ -139,6 +144,10 @@ export default class UbuntuMaintenanceExtension extends Extension {
         if (this._timeoutId) {
             GLib.source_remove(this._timeoutId);
             this._timeoutId = null;
+        }
+        if (this._startupTimeoutId) {
+            GLib.source_remove(this._startupTimeoutId);
+            this._startupTimeoutId = null;
         }
         if (this._gitUpdateTimeoutId) {
             GLib.source_remove(this._gitUpdateTimeoutId);
@@ -209,6 +218,55 @@ export default class UbuntuMaintenanceExtension extends Extension {
 
     _repositionIndicator() {
         this._buildIndicator();
+    }
+
+    // Zeigt die zuletzt gespeicherte Prüfung an, ohne Benachrichtigungen und ohne erneut zu speichern.
+    _applyCachedResults(data) {
+        this._lastData = data;
+        const state = data.overall_state || 'OK';
+        const totalUpdates = data.updates?.total || 0;
+        const alertsCount = data.security_alerts ? data.security_alerts.length : 0;
+        if (this._indicator) {
+            this._indicator.updatePanel(state, totalUpdates, alertsCount, false);
+        }
+        this._lastState = state;
+        this._rebuildMenu(data);
+    }
+
+    // Erste Prüfung nach Anmeldung/Entsperren: nach der Wartezeit, aber erst wenn der Rechner ruhig ist
+    // (CPU-/I/O-Druck niedrig); sonst im Minutentakt erneut versuchen, höchstens CALM_MAX_RETRIES-mal.
+    _scheduleStartupCheck(delaySec, attempt = 0) {
+        if (this._startupTimeoutId) {
+            GLib.source_remove(this._startupTimeoutId);
+            this._startupTimeoutId = null;
+        }
+        this._startupTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, Math.max(0, Math.round(delaySec)), () => {
+            this._startupTimeoutId = null;
+            if (!this._settings) return GLib.SOURCE_REMOVE;
+            const calm = isCalm(readTextFile('/proc/pressure/cpu'), readTextFile('/proc/pressure/io'));
+            if (!calm && attempt < CALM_MAX_RETRIES) {
+                this._scheduleStartupCheck(CALM_RETRY_SECONDS, attempt + 1);
+                return GLib.SOURCE_REMOVE;
+            }
+            this._runStartupCheck();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _runStartupCheck() {
+        this._startupDone = true;
+        this._triggerCheck();
+        this._rescheduleTimer();
+
+        // Update-Prüfung der Extension (Netzwerk) ebenfalls erst jetzt, nicht beim Anmelden/Entsperren
+        if (this._settings.get_boolean('update-check-enabled')) {
+            this._checkExtensionUpdate();
+            if (this._gitUpdateTimeoutId) GLib.source_remove(this._gitUpdateTimeoutId);
+            this._gitUpdateTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 21600, () => {
+                this._checkExtensionUpdate();
+                return GLib.SOURCE_CONTINUE;
+            });
+        }
     }
 
     _rescheduleTimer() {
@@ -289,6 +347,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
 
     _applyCheckResults(data) {
         this._lastData = data;
+        if (data && data.timestamp) saveCache(this._cacheFile, data);
         const state = data.overall_state || 'OK';
         const totalUpdates = data.updates?.total || 0;
         const alertsCount = data.security_alerts ? data.security_alerts.length : 0;

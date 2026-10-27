@@ -51,6 +51,7 @@ Native GNOME Shell Extension für Ubuntu 24.04+ (kompatibel mit GNOME 45, 46, 47
     * 🚀 Starten des interaktiven Wartungsskripts `ubuntumaintenance.sh` im konfigurierten Terminal.
     * 📂 Direktzugriff auf den Protokollordner (`~/.local/state/ubuntu-maintenance-indicator/logs`).
     * 🔄 Sofortige Neuprüfung im Hintergrund (asynchron).
+* **Ruhiger Start nach Anmeldung/Entsperren**: GNOME Shell aktiviert die Extension bei jeder Anmeldung und jedem Entsperren neu. Das Menü baut deshalb sofort aus dem Ergebnis der letzten Prüfung auf (`~/.local/state/ubuntu-maintenance-indicator/last_check.json`), die erste neue Prüfung startet frühestens nach einer einstellbaren Wartezeit (Standard 240 s) und erst, wenn der Rechner ruhig ist (Linux-PSI: CPU- und I/O-Druck unter 10 %, sonst bis zu 5 Wiederholungen im Minutentakt). Manuelle Aktionen („Jetzt aktualisieren“) laufen sofort.
 * **Native Libadwaita Preferences (`prefs.js`)**:
   * Konfigurierbares Prüfintervall, Terminal-Befehl und Panel-Position (Rechts, Mitte, Links).
   * Benachrichtigungs-Schalter für Updates und Sicherheitsalarme.

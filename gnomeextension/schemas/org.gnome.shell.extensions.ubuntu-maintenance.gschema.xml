@@ -14,6 +14,13 @@
       <description>Platzierung des Status-Icons in der oberen GNOME-Leiste.</description>
     </key>
 
+    <key name="startup-delay-seconds" type="i">
+      <range min="0" max="1800"/>
+      <default>240</default>
+      <summary>Wartezeit nach Anmeldung/Entsperren (Sekunden)</summary>
+      <description>Die erste Prüfung nach Anmeldung oder Entsperren startet frühestens nach dieser Zeit und erst, wenn der Rechner ruhig ist. 0 = sofort.</description>
+    </key>
+
     <key name="refresh-interval-minutes" type="i">
       <range min="5" max="1440"/>
       <default>30</default>
