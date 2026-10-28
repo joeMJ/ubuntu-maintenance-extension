@@ -1492,7 +1492,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
             return;
         }
 
-        const terminalCmd = this._settings ? this._settings.get_string('terminal-command') : 'gnome-terminal --';
+        const terminalCmd = this._terminalCommand();
         const fullCmd = `${terminalCmd} bash -c "${scriptPath}; echo; read -r -p 'Fertig - Enter zum Schliessen ' _"`;
         try {
             GLib.spawn_command_line_async(fullCmd);
@@ -1556,8 +1556,22 @@ export default class UbuntuMaintenanceExtension extends Extension {
         }
     }
 
+    // Liest den Terminal-Befehl abgesichert: get_string() auf einen Schluessel, der im geladenen
+    // Schema fehlt, bricht die ganze Shell ab (GLib-Fatal). Darum vorher has_key() pruefen.
+    _terminalCommand() {
+        const fallback = 'gnome-terminal --';
+        try {
+            const schema = this._settings?.settings_schema;
+            if (!schema || !schema.has_key('terminal-command'))
+                return fallback;
+            return this._settings.get_string('terminal-command') || fallback;
+        } catch (e) {
+            return fallback;
+        }
+    }
+
     _launchTerminal(command) {
-        const terminalCmd = this._settings ? this._settings.get_string('terminal-command') : 'gnome-terminal --';
+        const terminalCmd = this._terminalCommand();
         const fullCmd = `${terminalCmd} bash -c "${command}; echo; read -r -p 'Fertig - Enter zum Schliessen ' _"`;
         try {
             GLib.spawn_command_line_async(fullCmd);

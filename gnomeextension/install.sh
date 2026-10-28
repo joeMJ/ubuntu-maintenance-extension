@@ -26,23 +26,35 @@ echo -e "${CYAN}Installiere nach $TARGET_DIR...${NC}"
 mkdir -p "$TARGET_DIR"
 
 # 3. Dateien kopieren
-cp -f "$SCRIPT_DIR/metadata.json" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/extension.js" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/stylesheet.css" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/prefs.js" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/updater.js" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/startup.js" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/maintenance_backend.py" "$TARGET_DIR/"
-cp -f "$SCRIPT_DIR/selfupdate.py" "$TARGET_DIR/"
+# Wichtig: Eine laufende GNOME Shell hat Dateien dieser Extension geladen (JS-Module,
+# gschemas.compiled per mmap). Niemals an Ort und Stelle ueberschreiben (cp auf eine
+# bestehende Datei behaelt die Inode und aendert den Inhalt unter der Shell weg ->
+# GLib-Abbruch 'Settings schema ... does not contain a key'). Stattdessen in eine
+# Temp-Datei kopieren und per mv ersetzen: die Shell behaelt die alte, intakte Datei.
+install_file() {
+    local src="$1" dst="$2" tmp
+    tmp="${dst}.new.$$"
+    cp -f "$src" "$tmp" && mv -f "$tmp" "$dst"
+}
+for f in metadata.json extension.js stylesheet.css prefs.js updater.js startup.js \
+         maintenance_backend.py selfupdate.py; do
+    install_file "$SCRIPT_DIR/$f" "$TARGET_DIR/$f"
+done
 chmod +x "$TARGET_DIR/maintenance_backend.py" "$TARGET_DIR/selfupdate.py"
 
+# Schema: nur die XML kopieren, gschemas.compiled schreibt glib-compile-schemas selbst
+# (atomar per Umbenennen). Die kompilierte Datei aus dem Quellordner wird bewusst NICHT kopiert.
 mkdir -p "$TARGET_DIR/schemas"
-cp -f "$SCRIPT_DIR/schemas/"* "$TARGET_DIR/schemas/"
+for x in "$SCRIPT_DIR/schemas/"*.xml; do
+    install_file "$x" "$TARGET_DIR/schemas/$(basename "$x")"
+done
 glib-compile-schemas "$TARGET_DIR/schemas"
 
 # User-weite GSettings-Schemas aktualisieren
 mkdir -p "$HOME/.local/share/glib-2.0/schemas"
-cp -f "$SCRIPT_DIR/schemas/"*.xml "$HOME/.local/share/glib-2.0/schemas/"
+for x in "$SCRIPT_DIR/schemas/"*.xml; do
+    install_file "$x" "$HOME/.local/share/glib-2.0/schemas/$(basename "$x")"
+done
 glib-compile-schemas "$HOME/.local/share/glib-2.0/schemas"
 
 # Wartungsskript + Konfiguration (liegen im Repo-Stamm, eine Ebene über gnomeextension/)
@@ -117,4 +129,4 @@ install_am_optional || true
 
 echo -e "${GREEN}✅ Installation erfolgreich abgeschlossen!${NC}"
 echo -e "Die Extension '${UUID}' ist nun in GNOME aktiv."
-echo -e "Falls die Extension in Wayland noch nicht sofort sichtbar ist, melde dich kurz neu an oder drücke Alt+F2 -> r (unter X11)."
+echo -e "${YELLOW}Hinweis:${NC} Die laufende GNOME Shell nutzt noch den alten Code. Bitte melde dich bald ab und wieder an (unter X11: Alt+F2 -> r), bis dahin nicht im Extension-Menue klicken."
