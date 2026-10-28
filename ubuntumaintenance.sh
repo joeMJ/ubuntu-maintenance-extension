@@ -412,17 +412,19 @@ kernel_pull_reason() {
     fi
 }
 
+# Optionale Argumente: $2 = Titelzusatz, $3 = Einleitung, $4 = Simulationsausgabe fuer die Ursachen.
+# Ohne sie gilt der dist-upgrade-Fall (Ausgabe unveraendert).
 show_kernel_guard_warning() {
-    local pkgs="$1"
+    local pkgs="$1" what="${2:-dist-upgrade ist BLOCKIERT}" intro="${3:-Das Upgrade würde}" sim="${4:-$DIST_SIM_OUTPUT}"
     echo -e "\n${RED}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║  ⛔  ACHTUNG: FREMD-KERNEL ERKANNT - dist-upgrade ist BLOCKIERT          ║${NC}"
+    printf "${RED}║  ⛔  %-68s║${NC}\n" "ACHTUNG: FREMD-KERNEL ERKANNT - $what"
     echo -e "${RED}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
-    echo -e "${RED}Das Upgrade würde folgende Kernel-Pakete installieren, die NICHT zu diesem System passen:${NC}"
+    echo -e "${RED}$intro folgende Kernel-Pakete installieren, die NICHT zu diesem System passen:${NC}"
     local p
     while read -r p; do
         [ -z "$p" ] && continue
         echo -e "${YELLOW}   • $p${NC}"
-        echo -e "${CYAN}       ↳ $(kernel_pull_reason "$DIST_SIM_OUTPUT" "$p")${NC}"
+        echo -e "${CYAN}       ↳ $(kernel_pull_reason "$sim" "$p")${NC}"
     done <<< "$pkgs"
     echo -e "${CYAN}   (Weiterforschen: apt-cache rdepends <Paket>  bzw.  apt-get -s dist-upgrade | grep '^Inst linux-')${NC}"
     echo -e "${RED}Erlaubte Kernel-Typen: $ALLOWED_KERNEL_FLAVOURS${NC}"
@@ -433,7 +435,25 @@ show_kernel_guard_warning() {
     echo -e "   2. Bei Cloud-Kerneln die Sperre prüfen:  ${GREEN}cat $KERNEL_PIN_FILE${NC}"
     echo -e "   3. Nur wenn der Kernel wirklich gewollt ist, Typ erlauben: \"allowed_kernel_flavours\" in"
     echo -e "      ${GREEN}$KERNEL_USER_CFG${NC}"
-    echo -e "${YELLOW}Normale Paket-Updates (apt-get upgrade) werden trotzdem eingespielt; nur dist-upgrade wird übersprungen.${NC}\n"
+    if [ -z "$2" ]; then
+        echo -e "${YELLOW}Normale Paket-Updates (apt-get upgrade) werden trotzdem eingespielt; nur dist-upgrade wird übersprungen.${NC}\n"
+    else
+        echo -e "${YELLOW}Der vorgeschlagene Installationsbefehl wird deshalb nicht ausgegeben.${NC}\n"
+    fi
+}
+
+# Prueft vor einem "sudo apt-get install ..."-Hinweis (Kept back / Phased Updates) per Trockenlauf,
+# ob dabei ein Fremd-Kernel mitkaeme. Rueckgabe 0 = unbedenklich (Befehl darf angezeigt werden),
+# 1 = Fremd-Kernel (Warnrahmen wurde gezeigt, Befehl NICHT anzeigen).
+install_hint_is_safe() {
+    local pkgs="$1" sim foreign
+    sim=$(LANG=C apt-get install -s $pkgs 2>/dev/null)
+    foreign=$(foreign_kernel_pkgs "$sim")
+    [ -z "$foreign" ] && return 0
+    show_kernel_guard_warning "$foreign" "Install-Befehl wird NICHT angezeigt" "Der vorgeschlagene Befehl würde" "$sim"
+    KERNEL_GUARD_BLOCKED=true
+    [[ "$SEC_STATUS_SUMMARY" == "OK" ]] && SEC_STATUS_SUMMARY="FREMD-KERNEL im Install-Hinweis (Befehl unterdrückt)"
+    return 1
 }
 
 ensure_kernel_pin
@@ -515,15 +535,19 @@ else
     if [ -n "$PHASED_UPDATES" ]; then
         echo -e "\n${YELLOW}Wegen Phasenstufung (Phased Updates) zurückgestellt:${NC}"
         echo -e "$(echo "$PHASED_UPDATES" | fmt -w 80)"
-        echo -e "\n${CYAN}💡 Um diese sofort zu installieren, nutze folgenden Befehl:${NC}"
-        echo -e "👉 ${GREEN}sudo apt-get install $PHASED_UPDATES${NC}"
+        if install_hint_is_safe "$PHASED_UPDATES"; then
+            echo -e "\n${CYAN}💡 Um diese sofort zu installieren, nutze folgenden Befehl:${NC}"
+            echo -e "👉 ${GREEN}sudo apt-get install $PHASED_UPDATES${NC}"
+        fi
     fi
     
     if [ -n "$KEPT_BACK" ]; then
         echo -e "\n${YELLOW}Zurückgehalten (Kept back):${NC}"
         echo -e "$(echo "$KEPT_BACK" | fmt -w 80)"
-        echo -e "\n${CYAN}💡 Um diese sofort zu installieren, nutze folgenden Befehl:${NC}"
-        echo -e "👉 ${GREEN}sudo apt-get install $KEPT_BACK${NC}"
+        if install_hint_is_safe "$KEPT_BACK"; then
+            echo -e "\n${CYAN}💡 Um diese sofort zu installieren, nutze folgenden Befehl:${NC}"
+            echo -e "👉 ${GREEN}sudo apt-get install $KEPT_BACK${NC}"
+        fi
     fi
 fi
 
@@ -916,16 +940,36 @@ fi
 echo -n "Prüfe auf riskante offene Ports... "
 ALL_EXTERNAL=$(sudo ss -tulpen | grep LISTEN | grep -vE '127\.0\.0\.[0-9]+|::1' || true)
 
+# Erlaubte Prozesse und Ports aus der Konfiguration neben dem Skript UND der Rechner-Konfiguration
+# (~/.config/ubuntu-maintenance-indicator/maintenance.json), zusammengefuehrt. Ein Dienst gilt als
+# bekannt, wenn sein Prozessname ODER sein Port erlaubt ist (wie im Backend der GNOME-Extension).
 ALLOWED_PROCS=""
-if [ -f "$CONFIG_FILE" ] && command -v jq >/dev/null 2>&1; then
-    ALLOWED_PROCS=$(jq -r '.security.allowed_processes // [] | join("|")' "$CONFIG_FILE" 2>/dev/null)
+ALLOWED_PORTS=""
+if command -v jq >/dev/null 2>&1; then
+    for cfg in "$CONFIG_FILE" "$KERNEL_USER_CFG"; do
+        [ -f "$cfg" ] || continue
+        p=$(jq -r '.security.allowed_processes // [] | join("|")' "$cfg" 2>/dev/null)
+        [ -n "$p" ] && ALLOWED_PROCS="${ALLOWED_PROCS:+$ALLOWED_PROCS|}$p"
+        q=$(jq -r '[.security.allowed_ports // [] | .[] | .port | tostring] | join("|")' "$cfg" 2>/dev/null)
+        [ -n "$q" ] && ALLOWED_PORTS="${ALLOWED_PORTS:+$ALLOWED_PORTS|}$q"
+    done
 fi
 if [ -z "$ALLOWED_PROCS" ]; then
     ALLOWED_PROCS="syncthing|postfix|anydesk|nginx|smbd|nmbd|steam|wineserver64|avahi-daemon|cupsd|sshd|spotify"
 fi
 
-RISKY_PORTS=$(echo "$ALL_EXTERNAL" | grep -viE "$ALLOWED_PROCS" | grep LISTEN)
-KNOWN_PORTS=$(echo "$ALL_EXTERNAL" | grep -iE "$ALLOWED_PROCS" | grep LISTEN)
+RISKY_PORTS=""
+KNOWN_PORTS=""
+while IFS= read -r ss_line; do
+    [ -z "$ss_line" ] && continue
+    echo "$ss_line" | grep -q LISTEN || continue
+    ss_port=$(echo "$ss_line" | awk '{p=$5; sub(/.*:/, "", p); print p}')
+    if echo "$ss_line" | grep -qiE "$ALLOWED_PROCS" || { [ -n "$ALLOWED_PORTS" ] && echo "$ss_port" | grep -qxE "$ALLOWED_PORTS"; }; then
+        KNOWN_PORTS="${KNOWN_PORTS:+$KNOWN_PORTS$'\n'}$ss_line"
+    else
+        RISKY_PORTS="${RISKY_PORTS:+$RISKY_PORTS$'\n'}$ss_line"
+    fi
+done <<< "$ALL_EXTERNAL"
 
 if [ -n "$RISKY_PORTS" ]; then
     RISKY_PORTS=$(echo "$RISKY_PORTS" | awk '{
