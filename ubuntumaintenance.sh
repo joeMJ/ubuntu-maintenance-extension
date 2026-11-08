@@ -69,6 +69,7 @@ else
     OS_CODENAME="$(lsb_release -cs 2>/dev/null || echo "")"
 fi
 
+echo "Prüfe Ubuntu-Release-Informationen..."
 if command -v do-release-upgrade >/dev/null 2>&1; then
     RELEASE_CHECK_OUT=$(LC_ALL=C do-release-upgrade -c 2>&1)
     RELEASE_CHECK_EXIT=$?
@@ -901,7 +902,9 @@ fi
 echo -n "Prüfe RKHunter Hintergrund-Ergebnisse... "
 if [ "$RK_OK" = true ]; then
     if sudo test -f /var/log/rkhunter.log; then
-        RK_WARNINGS=$(sudo grep -i "warning" /var/log/rkhunter.log | grep -viE 'changed|replaced by a script|hidden directory|Checking for hidden files and directories|suspicious files and directories|suspicious file types|Checking /dev for suspicious|Info:|lwp-request|\.resolv\.conf\.systemd-resolved\.bak|\.updated')
+        # Das Log enthält mehrere Läufe: nur der letzte zählt (ab der letzten Zeile "Info: Start date is"),
+        # sonst bliebe eine einmalige Warnung tagelang sichtbar. Ohne solche Zeile gilt das ganze Log.
+        RK_WARNINGS=$(sudo tac /var/log/rkhunter.log | sed '/Info: Start date is/q' | tac | grep -i "warning" | grep -viE 'changed|replaced by a script|hidden directory|Checking for hidden files and directories|suspicious files and directories|suspicious file types|Checking /dev for suspicious|Info:|lwp-request|\.resolv\.conf\.systemd-resolved\.bak|\.updated')
         if [ -n "$RK_WARNINGS" ]; then
             echo -e "\n${YELLOW}⚠️ WARNUNGEN im Log gefunden:${NC}\n$RK_WARNINGS"
             echo -e "\n${CYAN}💡 Info & Lösung für RKHunter:${NC}"

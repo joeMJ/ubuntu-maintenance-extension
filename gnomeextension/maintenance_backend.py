@@ -935,6 +935,14 @@ def check_rkhunter(cfg):
         pattern_str = "|".join(ignore_patterns)
         ignore_re = re.compile(pattern_str, re.IGNORECASE)
 
+    # rkhunter.log sammelt mehrere Läufe (Rotation nur wöchentlich). Nur der letzte Lauf zählt, sonst bliebe
+    # eine einmalige Warnung (z. B. ein Zufallstreffer auf einem kurzlebigen Port) Tage nach einem sauberen Lauf.
+    last_start = 0
+    for idx, line in enumerate(lines):
+        if "Info: Start date is" in line:
+            last_start = idx
+    lines = lines[last_start:]
+
     raw_warnings = []
     for line in lines:
         if "warning" in line.lower():
