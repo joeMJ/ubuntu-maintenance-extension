@@ -35,12 +35,6 @@
       "pkg": "keepassxc",
       "repo_kw": "phoerious",
       "is_snap_target": "true"
-    },
-    {
-      "name": "Syncthing",
-      "pkg": "syncthing",
-      "repo_kw": "syncthing.net",
-      "is_snap_target": "true"
     }
   ],
   "security": {

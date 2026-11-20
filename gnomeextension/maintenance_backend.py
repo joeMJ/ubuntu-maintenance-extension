@@ -10,10 +10,12 @@ import os
 import re
 import json
 import glob
+import shlex
 import shutil
 import subprocess
 import time
 import urllib.request
+import concurrent.futures
 from datetime import datetime
 
 DEFAULT_CONFIG_PATHS = [
@@ -1089,6 +1091,522 @@ def format_kernel(res):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Update-Plan für das Aktualisieren-Fenster (rein lesend, braucht keine Rechte)
+#
+# Sammelt, was auf diesem Rechner ansteht, und stuft es ein. Es wird nichts installiert.
+# Kernel-Schutz (wie im Wartungsskript, aber strenger):
+#  - Kernel werden nach Version und Typ gruppiert (Image, Module, Header gehören zusammen),
+#  - Typen außerhalb von allowed_kernel_flavours sind gesperrt (nicht wählbar, mit Warnung),
+#  - ein Kernel ohne das passende NVIDIA-Modul ist gesperrt, wenn der laufende Kernel eines hat,
+#  - die Gesamtprüfung nutzt die Simulation 'dist-upgrade' (sie zeigt auch durch Empfehlungen nachgezogene Kernel).
+# ---------------------------------------------------------------------------
+KNOWN_KERNEL_FLAVOURS = {"generic", "oem", "lowlatency", "realtime", "aws", "azure", "azure-fde", "gcp", "gke", "kvm",
+                         "oracle", "ibm", "nvidia", "nvidia-lowlatency", "nvidia-bos"}
+KERNEL_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+-\d+)")
+KERNEL_NVIDIA_MODULE_PREFIXES = ("linux-modules-nvidia-", "linux-objects-nvidia-", "linux-signatures-nvidia-")
+APT_INST_RE = re.compile(r"^Inst (\S+)(?: \[([^\]]+)\])? \((\S+) ([^)]*)\)")
+
+
+def kernel_pkg_info(name):
+    """Ordnet ein linux-*-Paket einem Kernel zu: {is_kernel, version, flavour}. flavour None = ohne Typ."""
+    info = {"is_kernel": False, "version": None, "flavour": None}
+    if not (name or "").startswith("linux-"):
+        return info
+    m = re.search(r"(\d+\.\d+\.\d+-\d+)-([a-z][a-z0-9-]*)$", name)
+    if m:
+        info.update(is_kernel=True, version=m.group(1), flavour=m.group(2))
+        return info
+    m2 = KERNEL_VERSION_RE.search(name)
+    if m2:
+        info.update(is_kernel=True, version=m2.group(1))
+    tokens = name.split("-")[1:]
+    if not tokens:
+        return info
+    lead = tokens[1] if tokens[0] in ("image", "headers", "modules", "tools", "buildinfo", "signed", "cloud", "source") and len(tokens) > 1 else tokens[0]
+    tail1 = tokens[-1]
+    tail2 = "-".join(tokens[-2:]) if len(tokens) >= 2 else None
+    candidates = (tail2, tail1) if name.startswith(KERNEL_NVIDIA_MODULE_PREFIXES) else (tail2, tail1, lead)
+    for c in candidates:
+        if c in KNOWN_KERNEL_FLAVOURS:
+            info.update(is_kernel=True, flavour=c)
+            break
+    return info
+
+
+def kernel_unit_id(info):
+    if info["version"] and info["flavour"]:
+        return f"{info['version']}-{info['flavour']}"
+    if info["version"]:
+        return info["version"]
+    if info["flavour"]:
+        return f"Meta ({info['flavour']})"
+    return "Sonstige Kernel-Pakete"
+
+
+def _apt_sim(args, timeout=30):
+    """apt-get -s ohne Sperre (keine Rechte nötig). Gibt die Ausgabe (englisch) zurück oder ''."""
+    try:
+        res = subprocess.run(["apt-get", "-s", "-o", "Debug::NoLocking=true"] + list(args),
+                             capture_output=True, text=True, timeout=timeout, env=dict(os.environ, LANG="C.UTF-8"))
+        return res.stdout or ""
+    except Exception:
+        return ""
+
+
+def parse_apt_sim(out):
+    """Zerlegt eine apt-Simulation: Inst-Zeilen (Upgrade/Neu) sowie die Listen 'phased' und 'held'."""
+    inst, phased, held = [], [], []
+    section = None
+    for line in out.splitlines():
+        m = APT_INST_RE.match(line)
+        if m:
+            name, old, new, origin = m.groups()
+            inst.append({"name": name, "old": old, "new": new, "is_new": old is None,
+                         "security": "-security" in origin})
+            section = None
+            continue
+        if "The following upgrades have been deferred due to phasing:" in line:
+            section = "phased"
+        elif "The following packages have been kept back:" in line:
+            section = "held"
+        elif line.startswith("  ") and section:
+            (phased if section == "phased" else held).extend(line.split())
+        elif not line.startswith("  "):
+            section = None
+    return {"inst": inst, "phased": phased, "held": held}
+
+
+def parse_autoremove_sim(out):
+    names = []
+    for line in out.splitlines():
+        m = re.match(r"^(?:Purg|Remv) (\S+)", line)
+        if m and m.group(1) not in names:
+            names.append(m.group(1))
+    return names
+
+
+def _apt_descriptions(names):
+    desc = {}
+    names = [n for n in dict.fromkeys(names)][:150]
+    if not names:
+        return desc
+    try:
+        out = subprocess.run(["apt-cache", "show"] + names, capture_output=True, text=True, timeout=15,
+                             env=dict(os.environ, LANG="de_DE.UTF-8")).stdout
+        cur = None
+        for line in out.splitlines():
+            if line.startswith("Package: "):
+                cur = line.split(":", 1)[1].strip()
+            elif (line.startswith("Description-de: ") or line.startswith("Description: ")) and cur and cur not in desc:
+                desc[cur] = line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return desc
+
+
+def _dpkg_installed(name):
+    try:
+        out = subprocess.run(["dpkg-query", "-W", "-f", "${db:Status-Abbrev}", name], capture_output=True, text=True, timeout=5).stdout
+        return out.strip().startswith("ii")
+    except Exception:
+        return False
+
+
+def kernel_pin_files():
+    """APT-Sperren gegen Kernel-Typen (root-eigen, gelten für jeden Installationsweg)."""
+    found = []
+    for path in sorted(glob.glob("/etc/apt/preferences.d/*")):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                txt = f.read()
+        except Exception:
+            continue
+        if "linux-" in txt and re.search(r"Pin-Priority:\s*-1", txt):
+            found.append(path)
+    return found
+
+
+def _fl_label(fl):
+    return fl if fl else "ohne Typ"
+
+
+def build_update_plan(cfg, force_appimages=False, sim_override=None):
+    """Baut den Update-Plan als Datenstruktur (Gruppen mit Einträgen). Rein lesend."""
+    cfg = cfg or {}
+    allowed = cfg.get("allowed_kernel_flavours") or DEFAULT_KERNEL_FLAVOURS
+    running = os.uname().release
+    sim_override = sim_override or {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=7) as ex:
+        f_dist = ex.submit(lambda: sim_override.get("dist") if "dist" in sim_override else _apt_sim(["dist-upgrade"]))
+        f_clean = ex.submit(lambda: sim_override.get("clean") if "clean" in sim_override else _apt_sim(["autoremove", "--purge"]))
+        f_snap = ex.submit(check_snap)
+        f_flat = ex.submit(check_flatpak)
+        f_fw = ex.submit(check_firmware)
+        f_gext = ex.submit(check_gext)
+        f_ai = ex.submit(check_appimages, True if force_appimages else None)
+        dist_out, clean_out = f_dist.result(), f_clean.result()
+        snap_res, flat_res, fw_res, gext_res, ai_res = f_snap.result(), f_flat.result(), f_fw.result(), f_gext.result(), f_ai.result()
+
+    sim = parse_apt_sim(dist_out)
+    clean_names = parse_autoremove_sim(clean_out)
+    kern_res = check_kernel(cfg) if "kernel" not in sim_override else sim_override["kernel"]
+    running = kern_res.get("running") or running
+    nv = kern_res.get("nvidia", {})
+    desc = _apt_descriptions([i["name"] for i in sim["inst"] if not kernel_pkg_info(i["name"])["is_kernel"]]
+                             + [n for n in sim["phased"] + clean_names if not kernel_pkg_info(n)["is_kernel"]])
+
+    groups = []
+
+    # --- APT (ohne Kernel) ---
+    apt_items, units = [], {}
+    for i in sim["inst"]:
+        info = kernel_pkg_info(i["name"])
+        if info["is_kernel"]:
+            u = units.setdefault(kernel_unit_id(info), {"info": info, "packages": []})
+            u["packages"].append({"name": i["name"], "state": "inst", "is_new": i["is_new"], "new": i["new"]})
+            continue
+        sub = (f"{i['old']} → {i['new']}" if i["old"] else f"neu: {i['new']}")
+        if desc.get(i["name"]):
+            sub += f" · {desc[i['name']]}"
+        apt_items.append({"id": f"apt:{i['name']}", "name": i["name"], "subtitle": sub, "selected": True, "selectable": True,
+                          "badge": "Sicherheit" if i["security"] else None, "badge_kind": "warn" if i["security"] else None,
+                          "security": i["security"]})
+    apt_items.sort(key=lambda x: (not x["security"], x["name"]))
+    groups.append({"id": "apt", "title": "APT-Updates", "auth": "root", "items": apt_items,
+                   "empty": "Keine Paket-Updates (Paketlisten stammen vom letzten automatischen Abgleich)."})
+
+    # --- Phasen-Updates und Zurückgehaltene (ohne Kernel; Kernel stehen in der Kernel-Gruppe) ---
+    for kind, names in (("phased", sim["phased"]), ("held", sim["held"])):
+        for n in names:
+            info = kernel_pkg_info(n)
+            if info["is_kernel"]:
+                u = units.setdefault(kernel_unit_id(info), {"info": info, "packages": []})
+                u["packages"].append({"name": n, "state": kind, "is_new": False, "new": None})
+    phased_items = [{"id": f"phased:{n}", "name": n, "subtitle": desc.get(n, "Von apt zurückgehalten (gestufte Verteilung)"),
+                     "selected": False, "selectable": True, "badge": "gestuft", "badge_kind": None}
+                    for n in sim["phased"] if not kernel_pkg_info(n)["is_kernel"]]
+    groups.append({"id": "phased", "title": "Phasen-Updates (gestufte Verteilung)", "auth": "root", "items": phased_items,
+                   "empty": "Keine zurückgehaltenen Phasen-Updates."})
+    held_plain = [n for n in sim["held"] if not kernel_pkg_info(n)["is_kernel"]]
+    if held_plain:
+        groups.append({"id": "held", "title": "Von apt zurückgehalten (Abhängigkeiten, nicht installierbar)", "auth": "none",
+                       "items": [{"id": f"held:{n}", "name": n, "subtitle": "wird von apt zurückgehalten", "selected": False,
+                                  "selectable": False, "badge": None, "badge_kind": None} for n in held_plain], "empty": ""})
+
+    # --- Kernel ---
+    # Alles, was zum Plan gehört: Installationen, gestufte und zurückgehaltene Pakete (ein gestufter Kernel bringt sein Modul gestuft mit)
+    all_inst_names = {i["name"] for i in sim["inst"]} | set(sim["phased"]) | set(sim["held"])
+    nv_ready = bool(nv.get("hardware") and nv.get("driver_installed") and nv.get("module_package"))
+    nv_prefix = nv["module_package"][:-len(running)] if nv_ready and nv["module_package"].endswith(running) else None
+    kernel_items, foreign_in_plan = [], []
+    def _unit_order(entry):
+        m = re.match(r"(\d+)\.(\d+)\.(\d+)-(\d+)", entry[0])
+        return (0, tuple(-int(x) for x in m.groups()), entry[0]) if m else (1, (), entry[0])
+
+    for uid, u in sorted(units.items(), key=_unit_order):
+        info, pkgs = u["info"], u["packages"]
+        fl = info["flavour"]
+        ok_flavour = (fl is None) or (fl in allowed)
+        names = [p["name"] for p in pkgs]
+        is_running = uid == running
+        problems = []
+        if not ok_flavour:
+            problems.append(f"Typ '{fl}' ist nicht erlaubt (erlaubt: {', '.join(allowed)})")
+            foreign_in_plan.extend(names)
+        if ok_flavour and nv_prefix and info["version"] and fl and not is_running:
+            expected = nv_prefix + uid
+            if expected not in all_inst_names and not _dpkg_installed(expected):
+                problems.append(f"NVIDIA-Modul {expected} fehlt im Plan")
+        deferred = sorted({p["state"] for p in pkgs if p["state"] != "inst"})
+        sub = f"{len(pkgs)} Paket(e)"
+        if deferred:
+            sub += " · enthält " + " und ".join("gestufte" if d == "phased" else "zurückgehaltene" for d in deferred)
+        if problems:
+            sub += " · " + "; ".join(problems)
+        blocked = bool(problems)
+        kernel_items.append({"id": f"kernel:{uid}", "name": f"Kernel {uid}" if info["version"] else uid, "subtitle": sub,
+                             "selected": (not blocked) and not deferred, "selectable": not blocked,
+                             "badge": ("gesperrt" if blocked else (fl or None)), "badge_kind": "error" if blocked else "ok",
+                             "packages": names, "flavour": fl, "blocked": blocked, "problems": problems})
+    groups.append({"id": "kernel", "title": "Kernel", "auth": "root", "items": kernel_items,
+                   "empty": "Keine Kernel-Updates."})
+
+    # --- Snap / Flatpak / Firmware / gext / AppImages ---
+    groups.append({"id": "snap", "title": "Snap", "auth": "root", "empty": "Keine Snap-Updates.",
+                   "items": [{"id": f"snap:{d['name']}", "name": d["name"],
+                              "subtitle": "läuft gerade, wird beim Update beendet" if d.get("running") else "",
+                              "selected": True, "selectable": True, "badge": "läuft" if d.get("running") else None,
+                              "badge_kind": "warn" if d.get("running") else None} for d in snap_res.get("details", [])]})
+    fp_items = []
+    for line in flat_res.get("packages", []):
+        parts = [x.strip() for x in line.split("\t")] if "\t" in line else line.split(None, 2)
+        name = parts[0] if parts else line
+        app_id = parts[1] if len(parts) > 1 else ""
+        ver = parts[2] if len(parts) > 2 else ""
+        fp_items.append({"id": f"flatpak:{app_id or name}", "name": name, "subtitle": " · ".join(x for x in (app_id, ver) if x),
+                         "selected": True, "selectable": True, "badge": None, "badge_kind": None})
+    groups.append({"id": "flatpak", "title": "Flatpak", "auth": "none", "items": fp_items, "empty": "Keine Flatpak-Updates."})
+    fw_items = []
+    for d in fw_res.get("details", []):
+        rel = (d.get("Releases") or [{}])[0]
+        newv = rel.get("Version", "")
+        cur = d.get("Version", "")
+        fw_items.append({"id": f"fwupd:{d.get('DeviceId', d.get('Name', ''))}", "name": d.get("Name", "Gerät"),
+                         "subtitle": (f"{cur} → {newv}" if newv else cur),
+                         "selected": False, "selectable": True, "badge": "Neustart", "badge_kind": "warn"})
+    groups.append({"id": "firmware", "title": "Firmware (fwupd)", "auth": "root", "items": fw_items,
+                   "empty": "Keine Firmware-Updates.",
+                   "warning": "Firmware nicht vorab angehakt. Bei Secure Boot mit Clevis/TPM2-Entsperrung kann ein Firmware-Update die Entsperrung ändern."})
+    groups.append({"id": "gext", "title": "GNOME-Extensions", "auth": "none", "empty": "Keine Extension-Updates.",
+                   "items": [{"id": f"gext:{e.get('uuid') or e.get('name')}", "name": e.get("name") or e.get("uuid"),
+                              "subtitle": e.get("version", ""), "selected": True, "selectable": True, "badge": None, "badge_kind": None}
+                             for e in gext_res.get("extensions", []) if e.get("state") == "update"]})
+    ai_items = []
+    for a in ai_res.get("apps", []):
+        if a.get("state") == "update":
+            ai_items.append({"id": f"appimage:{a['name']}", "name": a["name"], "subtitle": f"{a.get('installed', '')} → {a.get('latest', '')}",
+                             "selected": True, "selectable": True, "badge": "Terminal", "badge_kind": None})
+    ai_note = ""
+    if ai_res.get("unknown"):
+        ai_note = f"{ai_res['unknown']} AppImage(s) konnten nicht geprüft werden."
+    groups.append({"id": "appimages", "title": "AppImages (AM)", "auth": "terminal", "items": ai_items,
+                   "empty": "Keine AppImage-Updates.", "note": ai_note,
+                   "warning": "AM verlangt ein Terminal für die Rechte und wird vorerst dort ausgeführt." if ai_items else ""})
+
+    # --- Aufräumen ---
+    clean_items = []
+    for n in clean_names:
+        info = kernel_pkg_info(n)
+        is_run = running in n
+        nvid = "nvidia" in n
+        note = "laufender Kernel, geschützt" if is_run else ("Kernel-Paket (alte Version)" if info["is_kernel"] else ("NVIDIA-Paket, vorher prüfen" if nvid else desc.get(n, "")))
+        clean_items.append({"id": f"clean:{n}", "name": n, "subtitle": note,
+                            "selected": not (info["is_kernel"] or nvid or is_run), "selectable": not is_run,
+                            "badge": "geschützt" if is_run else ("prüfen" if (info["is_kernel"] or nvid) else None),
+                            "badge_kind": "warn" if (info["is_kernel"] or nvid) and not is_run else None})
+    groups.append({"id": "cleanup", "title": "Aufräumen (nicht mehr benötigte Pakete)", "auth": "root", "items": clean_items,
+                   "empty": "Nichts aufzuräumen."})
+
+    pins = kernel_pin_files()
+    guard = {
+        "allowed": allowed, "running": running, "running_ok": kern_res.get("running_ok", True),
+        "pin_files": pins, "pin_ok": bool(pins),
+        "foreign_in_plan": sorted(set(foreign_in_plan)),
+        "foreign_installed": kern_res.get("foreign_installed", []),
+        "nvidia": {"checked": nv_ready, "hardware": bool(nv.get("hardware")), "module_package": nv.get("module_package")},
+        "warnings": list(kern_res.get("warnings", [])),
+    }
+    if foreign_in_plan:
+        guard["warnings"].append("Die Simulation würde Kernel mit nicht erlaubtem Typ installieren: " + ", ".join(sorted(set(foreign_in_plan))[:6]))
+    if not pins:
+        guard["warnings"].append("Keine APT-Sperre gegen Kernel-Typen gefunden (/etc/apt/preferences.d): Der Schutz beruht nur auf dieser Prüfung.")
+    return {
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "reboot": check_reboot(),
+        "guard": guard,
+        "groups": groups,
+        "totals": {g["id"]: len(g.get("items", [])) for g in groups},
+    }
+
+
+def format_update_plan(plan):
+    lines = [f"Update-Plan ({plan.get('generated')})"]
+    g = plan.get("guard", {})
+    lines.append(f"Kernel-Schutz: laufend {g.get('running')} · erlaubt: {', '.join(g.get('allowed', []))} · APT-Sperre: "
+                 f"{', '.join(os.path.basename(x) for x in g.get('pin_files', [])) or 'KEINE'}")
+    for w in g.get("warnings", []):
+        lines.append(f"  [!] {w}")
+    for grp in plan.get("groups", []):
+        items = grp.get("items", [])
+        lines.append(f"== {grp['title']} [{grp['auth']}]: {len(items)}")
+        for it in items[:12]:
+            mark = "x" if it.get("selected") else " "
+            if not it.get("selectable", True):
+                mark = "-"
+            lines.append(f"   [{mark}] {it['name']}  {it.get('subtitle', '')[:90]}  {('<' + it['badge'] + '>') if it.get('badge') else ''}")
+        if len(items) > 12:
+            lines.append(f"   … und {len(items) - 12} weitere")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Update-Lauf (Schritt 2): Auswahl prüfen und das Root-Skript für EIN pkexec zusammenbauen.
+#
+# Sicherheitsgrundsätze:
+#  - Es ist kein Root-Code installiert. Das Skript entsteht pro Lauf, ist vollständig sichtbar und wird dem
+#    Fenster zurückgegeben; pkexec bekommt es als Argument (kein Pfad in einem Ordner, den andere ändern könnten).
+#  - Nur Paketnamen aus dem frisch berechneten Plan, zusätzlich per Muster geprüft und gequotet.
+#  - Kernel-Schutz auf dem exakten Installationsbefehl: Trockenlauf ohne Rechte hier und noch einmal im Skript
+#    unmittelbar vor der Installation (Typ nicht erlaubt -> Abbruch ohne Installation).
+# ---------------------------------------------------------------------------
+PKG_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9+.:~_-]*$")
+SNAP_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+FW_ID_RE = re.compile(r"^[0-9a-fA-F]{8,64}$")
+APT_RUN_OPTS = ["-y", "--no-install-recommends", "-o", "APT::Get::Always-Include-Phased-Updates=true",
+                "-o", "DPkg::Lock::Timeout=300", "-o", "Dpkg::Options::=--force-confdef",
+                "-o", "Dpkg::Options::=--force-confold", "-o", "APT::Status-Fd=1"]
+
+
+def _apt_sim_full(args, timeout=60):
+    try:
+        res = subprocess.run(["apt-get", "-s", "-o", "Debug::NoLocking=true"] + list(args), capture_output=True, text=True,
+                             timeout=timeout, env=dict(os.environ, LANG="C.UTF-8"))
+        return res.returncode, res.stdout or "", (res.stderr or "").strip()
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def build_update_script(plan, selected_ids, cfg, sim=None):
+    """Prüft die Auswahl gegen den Plan und liefert {ok, problems, extra, summary, script}.
+    sim(args) -> (rc, stdout, stderr) ist für Tests austauschbar."""
+    sim = sim or _apt_sim_full
+    cfg = cfg or {}
+    allowed = list(cfg.get("allowed_kernel_flavours") or DEFAULT_KERNEL_FLAVOURS)
+    running = os.uname().release
+    problems = []
+    by_id = {}
+    for g in plan.get("groups", []):
+        for it in g.get("items", []):
+            by_id[it["id"]] = (g["id"], it)
+
+    install, purge, snaps, fw = [], [], [], []
+    for sid in dict.fromkeys(selected_ids):
+        if sid not in by_id:
+            problems.append(f"Unbekannter Eintrag (nicht im aktuellen Plan): {sid}")
+            continue
+        gid, it = by_id[sid]
+        if it.get("selectable") is False or it.get("blocked"):
+            problems.append(f"{it.get('name', sid)} ist gesperrt und kann nicht installiert werden.")
+            continue
+        if gid in ("apt", "phased"):
+            install.append(it["name"])
+        elif gid == "kernel":
+            install.extend(it.get("packages", []))
+        elif gid == "cleanup":
+            purge.append(it["name"])
+        elif gid == "snap":
+            snaps.append(it["name"])
+        elif gid == "firmware":
+            fw.append(sid.split(":", 1)[1])
+        else:
+            problems.append(f"{it.get('name', sid)}: dieser Bereich wird im Fenster noch nicht ausgeführt.")
+    install = list(dict.fromkeys(install))
+    for n in install + purge:
+        if not PKG_NAME_RE.match(n):
+            problems.append(f"Ungültiger Paketname: {n!r}")
+    for n in snaps:
+        if not SNAP_NAME_RE.match(n):
+            problems.append(f"Ungültiger Snap-Name: {n!r}")
+    for n in fw:
+        if not FW_ID_RE.match(n):
+            problems.append(f"Ungültige Firmware-Kennung: {n!r}")
+    for n in purge:
+        if running in n:
+            problems.append(f"{n} gehört zum laufenden Kernel und wird nicht entfernt.")
+    if problems:
+        return {"ok": False, "problems": problems, "extra": [], "summary": {}, "script": ""}
+
+    # Trockenlauf des exakten Installationsbefehls (ohne Rechte) und Kernel-Schutz darauf
+    extra = []
+    sim_install_names = []
+    if install:
+        rc, out, err = sim(["install", "--no-install-recommends", "-o", "APT::Get::Always-Include-Phased-Updates=true"] + install)
+        parsed = parse_apt_sim(out)
+        if rc != 0:
+            problems.append("apt kann die Auswahl nicht auflösen: " + (err.splitlines()[-1] if err else f"Rückgabecode {rc}"))
+        sim_install_names = [i["name"] for i in parsed["inst"]]
+        extra = sorted(set(sim_install_names) - set(install))
+        kern_res = check_kernel(cfg)
+        nv = kern_res.get("nvidia", {})
+        run = kern_res.get("running") or running
+        nv_ready = bool(nv.get("hardware") and nv.get("driver_installed") and nv.get("module_package"))
+        nv_prefix = nv["module_package"][:-len(run)] if nv_ready and nv["module_package"].endswith(run) else None
+        seen_units = set()
+        for name in sim_install_names:
+            info = kernel_pkg_info(name)
+            if info["is_kernel"] and info["flavour"] and info["flavour"] not in allowed:
+                problems.append(f"Kernel-Typ nicht erlaubt: {name} (erlaubt: {', '.join(allowed)})")
+            if info["is_kernel"] and info["version"] and info["flavour"] and name.startswith("linux-image-"):
+                seen_units.add(kernel_unit_id(info))
+        if nv_prefix:
+            for uid in seen_units:
+                expected = nv_prefix + uid
+                if uid != run and expected not in sim_install_names and not _dpkg_installed(expected):
+                    problems.append(f"Kernel {uid}: NVIDIA-Modul {expected} wäre nicht dabei.")
+    if purge:
+        rc, out, err = sim(["purge"] + purge)
+        removed = parse_autoremove_sim(out)
+        cascade = sorted(set(removed) - set(purge))
+        if rc != 0:
+            problems.append("apt kann das Aufräumen nicht auflösen: " + (err.splitlines()[-1] if err else f"Rückgabecode {rc}"))
+        if cascade:
+            problems.append("Das Aufräumen würde zusätzlich entfernen: " + ", ".join(cascade[:8]) + (" …" if len(cascade) > 8 else ""))
+        if any(running in n for n in removed):
+            problems.append("Das Aufräumen würde den laufenden Kernel entfernen.")
+    if problems:
+        return {"ok": False, "problems": problems, "extra": extra, "summary": {}, "script": ""}
+
+    q = shlex.quote
+    opts = " ".join(q(o) for o in APT_RUN_OPTS)
+    allowed_words = " ".join(q(a) for a in allowed)
+    steps = []
+    if install:
+        steps.append(("apt", f"{len(install)} Pakete installieren"))
+    if purge:
+        steps.append(("purge", f"{len(purge)} Pakete entfernen"))
+    if snaps:
+        steps.append(("snap", f"{len(snaps)} Snap(s) aktualisieren"))
+    if fw:
+        steps.append(("fw", f"{len(fw)} Firmware-Update(s)"))
+    total = len(steps)
+    L = ["set -u", "export PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+         "export DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none NEEDRESTART_MODE=l LANG=C.UTF-8",
+         "exec 2>&1", "FAILED=0", f"ALLOWED=({allowed_words})",
+         f"APT_OPTS=({opts})", ""]
+    n = 0
+    if install:
+        n += 1
+        pk = " ".join(q(x) for x in install)
+        L += [f"echo '##STEP {n}/{total} Kernel-Schutz prüfen und Pakete installieren'",
+              f"INSTALL=({pk})",
+              "SIM=$(apt-get -s -o Debug::NoLocking=true install --no-install-recommends -o APT::Get::Always-Include-Phased-Updates=true \"${INSTALL[@]}\" 2>&1)",
+              "BAD=0",
+              "while read -r fl pkg; do",
+              "  [ -n \"$fl\" ] || continue",
+              "  ok=0; for a in \"${ALLOWED[@]}\"; do [ \"$fl\" = \"$a\" ] && ok=1; done",
+              "  if [ \"$ok\" = 0 ]; then echo \"##ABORT Kernel-Typ nicht erlaubt: $pkg ($fl)\"; BAD=1; fi",
+              "done < <(printf '%s\\n' \"$SIM\" | sed -nE 's/^Inst (linux-[a-z0-9.+-]*[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+-([a-z][a-z0-9-]*)) .*/\\2 \\1/p')",
+              "if [ \"$BAD\" = 1 ]; then echo '##RESULT 2'; exit 2; fi",
+              "apt-get install \"${APT_OPTS[@]}\" \"${INSTALL[@]}\" || { echo '##FAIL apt install'; FAILED=1; }",
+              ""]
+    if purge:
+        n += 1
+        pg = " ".join(q(x) for x in purge)
+        L += [f"echo '##STEP {n}/{total} Nicht mehr benötigte Pakete entfernen'",
+              f"PURGE=({pg})",
+              "if [ \"$FAILED\" = 1 ]; then echo '##SKIP Aufräumen übersprungen, weil die Installation fehlgeschlagen ist'; else",
+              "  for p in \"${PURGE[@]}\"; do case \"$p\" in *\"$(uname -r)\"*) echo \"##ABORT Laufender Kernel: $p\"; echo '##RESULT 2'; exit 2;; esac; done",
+              "  apt-get purge \"${APT_OPTS[@]}\" \"${PURGE[@]}\" || { echo '##FAIL apt purge'; FAILED=1; }",
+              "fi", ""]
+    if snaps:
+        n += 1
+        L += [f"echo '##STEP {n}/{total} Snaps aktualisieren'",
+              f"snap refresh {' '.join(q(x) for x in snaps)} || {{ echo '##FAIL snap refresh'; FAILED=1; }}", ""]
+    if fw:
+        n += 1
+        L += [f"echo '##STEP {n}/{total} Firmware aktualisieren'"]
+        for d in fw:
+            L.append(f"fwupdmgr update --assume-yes --no-reboot-check {q(d)} || {{ echo '##FAIL fwupdmgr {d[:8]}'; FAILED=1; }}")
+        L.append("")
+    L += ["echo \"##RESULT $FAILED\"", "exit $FAILED"]
+    return {"ok": True, "problems": [], "extra": extra,
+            "summary": {"install": len(install), "total": len(set(sim_install_names) | set(install)), "purge": len(purge), "snap": len(snaps), "firmware": len(fw), "steps": total},
+            "script": "\n".join(L) + "\n"}
+
+
+
 def run_full_check():
     cfg, cfg_path = load_config()
 
@@ -1188,6 +1706,23 @@ def main():
         elif cmd == "--kernel-text":
             cfg, _ = load_config()
             print(format_kernel(check_kernel(cfg)))
+            return
+        elif cmd == "--update-script":
+            # Eingabe (stdin): {"selected": ["apt:foo", ...]}; berechnet den Plan frisch und prüft die Auswahl dagegen
+            cfg, _ = load_config()
+            try:
+                req = json.load(sys.stdin)
+                selected = [str(x) for x in req.get("selected", [])]
+            except Exception as e:
+                print(json.dumps({"ok": False, "problems": [f"Ungültige Eingabe: {e}"], "extra": [], "summary": {}, "script": ""}))
+                return
+            plan = build_update_plan(cfg)
+            print(json.dumps(build_update_script(plan, selected, cfg), ensure_ascii=False))
+            return
+        elif cmd in ("--update-plan", "--update-plan-text"):
+            cfg, _ = load_config()
+            plan = build_update_plan(cfg, force_appimages=("--force-appimages" in sys.argv))
+            print(format_update_plan(plan) if cmd == "--update-plan-text" else json.dumps(plan, ensure_ascii=False, indent=2))
             return
         elif cmd == "--copy-logs":
             cfg, _ = load_config()

@@ -37,10 +37,10 @@ install_file() {
     cp -f "$src" "$tmp" && mv -f "$tmp" "$dst"
 }
 for f in metadata.json extension.js stylesheet.css prefs.js updater.js startup.js \
-         maintenance_backend.py selfupdate.py; do
+         maintenance_backend.py selfupdate.py update-window.js; do
     install_file "$SCRIPT_DIR/$f" "$TARGET_DIR/$f"
 done
-chmod +x "$TARGET_DIR/maintenance_backend.py" "$TARGET_DIR/selfupdate.py"
+chmod +x "$TARGET_DIR/maintenance_backend.py" "$TARGET_DIR/selfupdate.py" "$TARGET_DIR/update-window.js"
 
 # Schema: nur die XML kopieren, gschemas.compiled schreibt glib-compile-schemas selbst
 # (atomar per Umbenennen). Die kompilierte Datei aus dem Quellordner wird bewusst NICHT kopiert.

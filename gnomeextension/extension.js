@@ -1388,6 +1388,13 @@ export default class UbuntuMaintenanceExtension extends Extension {
 
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
+        const updateItem = new PopupMenu.PopupImageMenuItem(
+            'Aktualisieren …',
+            'software-update-available-symbolic'
+        );
+        updateItem.connect('activate', () => this._openUpdateWindow());
+        menu.addMenuItem(updateItem);
+
         const maintItem = new PopupMenu.PopupImageMenuItem(
             'Vollständige Systemwartung starten',
             'system-run-symbolic'
@@ -1567,6 +1574,19 @@ export default class UbuntuMaintenanceExtension extends Extension {
             return this._settings.get_string('terminal-command') || fallback;
         } catch (e) {
             return fallback;
+        }
+    }
+
+    /** Aktualisieren-Fenster: eigene App (GTK4/libadwaita), getrennt von der Shell gestartet. Zeigt den Plan, installiert (noch) nichts. */
+    _openUpdateWindow() {
+        const script = GLib.build_filenamev([this.path, 'update-window.js']);
+        try {
+            if (!GLib.file_test(script, GLib.FileTest.EXISTS))
+                throw new Error('update-window.js fehlt (bitte die Extension neu installieren)');
+            Gio.Subprocess.new(['/usr/bin/gjs', '-m', script], Gio.SubprocessFlags.NONE);
+        } catch (e) {
+            console.error(`[ubuntu-maintenance] Aktualisieren-Fenster nicht startbar: ${e.message}`);
+            Main.notify('Aktualisieren', `Das Fenster konnte nicht gestartet werden: ${e.message}`);
         }
     }
 

@@ -89,6 +89,11 @@ cd gnomeextension
 ./uninstall.sh --purge   # entfernt auch Einstellungen und Benutzerdaten (mit Rückfrage)
 ```
 
+### Aktualisieren-Fenster
+Der Menüeintrag „Aktualisieren …“ öffnet ein eigenes Fenster (GTK4/libadwaita, `update-window.js`, ohne Terminal). Es zeigt, was tatsächlich ansteht: APT, Kernel (je Version/Typ), Phasen-Updates, Snap, Firmware, Aufräumkandidaten sowie (nur Anzeige) Flatpak, GNOME-Extensions und AppImages. Die Daten liefert das Backend rein lesend (`maintenance_backend.py --update-plan`).
+
+Nach „Aktualisieren“ prüft das Backend die Auswahl (`--update-script`): frischer Plan, Trockenlauf des exakten Installationsbefehls und **Kernel-Schutz** (nicht erlaubte Kernel-Typen oder ein Kernel ohne passendes NVIDIA-Modul werden abgelehnt; zusätzlich Prüfung im Skript direkt vor der Installation). Nach einer Bestätigung mit vollständig sichtbarem Skript läuft es mit **einem** `pkexec` (eine Anmeldung); der Fortschritt erscheint im Fenster. Es ist kein Root-Code installiert, das Skript entsteht pro Lauf. Die Installation läuft mit `--no-install-recommends`; Phasen-Updates nur, wenn angehakt. Flatpak, GNOME-Extensions und AppImages folgen in einem weiteren Schritt.
+
 ### Kernel-Schutz im Wartungsskript
 `ubuntumaintenance.sh` führt vor jedem `dist-upgrade` einen Trockenlauf aus (`apt-get -s dist-upgrade`). Würde dabei ein Kernel-Paket mit nicht erlaubtem Typ (z. B. `-gke`) installiert, wird `dist-upgrade` mit deutlicher Warnung übersprungen (mit `--ask` ist ein ausdrückliches Weitermachen möglich, Standard: Nein). Zusätzlich bietet das Skript an, `/etc/apt/preferences.d/no-cloud-kernels` anzulegen, eine APT-Sperre für Cloud-Kernel (`gke`, `gcp`, `aws`, `azure`, `oracle`, `ibm`, `kvm`).
 

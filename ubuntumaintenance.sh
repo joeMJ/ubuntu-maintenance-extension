@@ -177,8 +177,16 @@ ask_yes_no() {
 }
 
 echo -e "${YELLOW}Authentifizierung erforderlich${NC}"
-sudo -v
-echo -e "${GREEN}Authentifizierung abgeschlossen${NC}"
+if sudo -v; then
+    echo -e "${GREEN}Authentifizierung abgeschlossen${NC}"
+else
+    # Ohne gueltiges sudo liefern die Pruefungen leere Ausgaben und damit falsche Ergebnisse
+    # (z. B. 'Firewall INAKTIV'), und Updates wuerden nicht installiert. Darum hier sauber beenden.
+    echo -e "${RED}❌ Authentifizierung fehlgeschlagen (Zeitüberschreitung oder abgebrochen).${NC}"
+    echo -e "${RED}Ohne sudo kann das Skript weder Updates installieren noch die Sicherheit prüfen.${NC}"
+    echo -e "${YELLOW}Bitte erneut starten und die Abfrage (FIDO/Passwort) rechtzeitig bestätigen.${NC}"
+    exit 1
+fi
 
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
@@ -436,7 +444,7 @@ show_kernel_guard_warning() {
     echo -e "   2. Bei Cloud-Kerneln die Sperre prüfen:  ${GREEN}cat $KERNEL_PIN_FILE${NC}"
     echo -e "   3. Nur wenn der Kernel wirklich gewollt ist, Typ erlauben: \"allowed_kernel_flavours\" in"
     echo -e "      ${GREEN}$KERNEL_USER_CFG${NC}"
-    if [ -z "$2" ]; then
+    if [ -z "${2:-}" ]; then
         echo -e "${YELLOW}Normale Paket-Updates (apt-get upgrade) werden trotzdem eingespielt; nur dist-upgrade wird übersprungen.${NC}\n"
     else
         echo -e "${YELLOW}Der vorgeschlagene Installationsbefehl wird deshalb nicht ausgegeben.${NC}\n"
@@ -892,7 +900,19 @@ fi
 
 echo ""
 echo -n "Prüfe Firewall... "
-if ! sudo ufw status | grep -qiwE "active|aktiv"; then
+# Fehlgeschlagenes sudo (leere Ausgabe) ist nicht dasselbe wie 'inaktiv': dann nur die Gegenprobe
+# ohne root (ENABLED in ufw.conf, Dienststatus) und 'nicht prüfbar' melden.
+FW_OUT=$(sudo ufw status)
+FW_RC=$?
+if [ "$FW_RC" -ne 0 ] || [ -z "$FW_OUT" ]; then
+    if grep -qE '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null && systemctl is-active --quiet ufw 2>/dev/null; then
+        echo -e "${YELLOW}⚠️ NICHT PRÜFBAR${NC} (sudo fehlgeschlagen; laut /etc/ufw/ufw.conf und Dienst aktiviert)"
+        SEC_STATUS_SUMMARY="Warnung (Firewall nicht prüfbar, sudo fehlgeschlagen)"
+    else
+        echo -e "${RED}⚠️ NICHT PRÜFBAR${NC} (sudo fehlgeschlagen; ufw.conf/Dienst zeigen NICHT aktiviert - bitte mit 'sudo ufw status' prüfen)"
+        SEC_STATUS_SUMMARY="Warnung (Firewall nicht prüfbar, vermutlich inaktiv)"
+    fi
+elif ! echo "$FW_OUT" | grep -qiwE "active|aktiv"; then
     echo -e "${RED}❌ INAKTIV${NC} (Bitte mit 'sudo ufw enable' einschalten)"
     SEC_STATUS_SUMMARY="Warnung (Firewall inaktiv)"
 else
