@@ -177,8 +177,12 @@ function buildWindow(app) {
     // --- Schritte ohne root: Flatpak und AppImages (AM) als normaler Benutzer ---
     function userSteps(ids) {
         const steps = [];
-        const fp = ids.filter(i => i.startsWith('flatpak:')).map(i => i.slice(8));
-        if (fp.length) steps.push({ title: `Flatpak aktualisieren (${fp.length})`, argv: ['flatpak', 'update', '-y', '--noninteractive', ...fp] });
+        // IDs: flatpak:<system|user>:<vollständige Referenz>; je Installation ein eigener Aufruf
+        const REF_RE = /^(app|runtime)\/[A-Za-z0-9._-]+\/[A-Za-z0-9_]+\/[A-Za-z0-9._-]+$/;
+        for (const [inst, label] of [['system', 'System'], ['user', 'Benutzer']]) {
+            const refs = ids.filter(i => i.startsWith(`flatpak:${inst}:`)).map(i => i.slice(`flatpak:${inst}:`.length)).filter(r => REF_RE.test(r));
+            if (refs.length) steps.push({ title: `Flatpak (${label}) aktualisieren: ${refs.length}`, argv: ['flatpak', 'update', `--${inst}`, '-y', '--noninteractive', ...refs] });
+        }
         const am = GLib.find_program_in_path('am') ?? GLib.find_program_in_path('appman') ?? 'am';
         for (const id of ids.filter(i => i.startsWith('appimage:'))) {
             const name = id.slice(9);

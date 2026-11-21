@@ -94,6 +94,12 @@ Der Menüeintrag „Aktualisieren …“ öffnet ein eigenes Fenster (GTK4/libad
 
 Nach „Aktualisieren“ prüft das Backend die Auswahl (`--update-script`): frischer Plan, Trockenlauf des exakten Installationsbefehls und **Kernel-Schutz** (nicht erlaubte Kernel-Typen oder ein Kernel ohne passendes NVIDIA-Modul werden abgelehnt; zusätzlich Prüfung im Skript direkt vor der Installation). Nach einer Bestätigung mit vollständig sichtbarem Skript läuft es mit **einem** `pkexec` (eine Anmeldung); der Fortschritt erscheint im Fenster. Es ist kein Root-Code installiert, das Skript entsteht pro Lauf. Die Installation läuft mit `--no-install-recommends`; Phasen-Updates nur, wenn angehakt. Flatpak, GNOME-Extensions und AppImages folgen in einem weiteren Schritt.
 
+### AppImages (AM): suchen, installieren, umziehen
+Die Einstellungsseite „AppImages (AM)“ (`am-page.js`, `am_tool.py`) arbeitet im Benutzerordner, ohne Administratorrechte:
+- **Suchen und installieren:** Suche in der AM-Datenbank (`am -q`), Installation per `am -i --user` mit anschließender Prüfung (Programmdatei, Updater, Link, Start).
+- **Externes GitHub-AppImage:** Für Programme außerhalb der Datenbank (`am -e --user nutzer/projekt name [Schlüsselwort]`), z. B. Thorium mit Variante AVX2. Bestehende Systeminstallationen, die so installiert wurden, werden als Vorschlag angeboten (Repository und Schlüsselwort stehen im `AM-updater`).
+- **Umzug** der systemweiten AppImages aus `/opt` in den Benutzerordner. Das Entfernen der Systemversionen braucht eine Anmeldung (Skript vorher einsehbar).
+
 ### Kernel-Schutz im Wartungsskript
 `ubuntumaintenance.sh` führt vor jedem `dist-upgrade` einen Trockenlauf aus (`apt-get -s dist-upgrade`). Würde dabei ein Kernel-Paket mit nicht erlaubtem Typ (z. B. `-gke`) installiert, wird `dist-upgrade` mit deutlicher Warnung übersprungen (mit `--ask` ist ein ausdrückliches Weitermachen möglich, Standard: Nein). Zusätzlich bietet das Skript an, `/etc/apt/preferences.d/no-cloud-kernels` anzulegen, eine APT-Sperre für Cloud-Kernel (`gke`, `gcp`, `aws`, `azure`, `oracle`, `ibm`, `kvm`).
 

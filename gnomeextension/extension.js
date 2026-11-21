@@ -637,11 +637,15 @@ export default class UbuntuMaintenanceExtension extends Extension {
             this._addSidecarHeader(sidecar, 'application-x-executable-symbolic', 'Flatpak Apps & Runtimes', `${flatpak.count || 0} ausstehend`, textColor, dimmedColor);
 
             const listContainer = new St.BoxLayout({ vertical: true, style: 'margin-top: 8px;' });
-            if (pkgs.length === 0) {
+            const fpErrors = flatpak.errors || [];
+            if (pkgs.length === 0 && fpErrors.length === 0) {
                 listContainer.add_child(new St.Label({ text: '✓ Alle Flatpak-Laufzeitumgebungen und Apps sind aktuell.', style: `color: ${statusGreen}; font-size: 11px; font-weight: 500;` }));
-            } else {
+            } else if (pkgs.length > 0) {
                 listContainer.add_child(new St.Label({ text: pkgs.join(', '), style: `color: ${textColor}; font-size: 11px;` }));
             }
+            fpErrors.forEach(e => listContainer.add_child(new St.Label({
+                text: `${e.installation === 'user' ? 'Benutzer' : 'System'}: nicht prüfbar (${e.error})`,
+                style: `color: ${statusOrange}; font-size: 11px;` })));
             sidecar.add_child(listContainer);
 
         } else if (type === 'appimages') {

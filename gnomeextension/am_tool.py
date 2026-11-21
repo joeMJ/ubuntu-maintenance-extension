@@ -10,6 +10,10 @@ Aufruf (über maintenance_backend.py oder direkt):
   am_tool.py --am-status
   am_tool.py --am-check-dir <Pfad> [--need-bytes N]
   am_tool.py --am-migration-plan [--dir <Pfad>]
+  am_tool.py --am-search <Begriff> [--all]       (rein lesend)
+  am_tool.py --am-install-new <name> [<name>…]   (Benutzerordner, ohne root)
+  am_tool.py --am-extra-hints                    (rein lesend)
+  am_tool.py --am-install-extra <nutzer/projekt> <name> [<Schlüsselwort>]
 """
 
 import glob
@@ -31,8 +35,8 @@ APPMAN_URL = "https://raw.githubusercontent.com/ivan-hc/AM/main/APP-MANAGER"
 EXCLUDED = {
     "heroic-games-launcher": "AppArmor-Profil ist fest auf /opt/heroic-games-launcher/… eingestellt; nach dem Umzug würde der Start scheitern.",
     "heroic": "AppArmor-Profil ist fest auf /opt/heroic-games-launcher/… eingestellt; nach dem Umzug würde der Start scheitern.",
-    "thorium": "Mehrere Varianten (AVX/AVX2); die Variante der Systeminstallation müsste vorher geprüft werden.",
-    "thorium-browser": "Mehrere Varianten (AVX/AVX2); die Variante der Systeminstallation müsste vorher geprüft werden.",
+    "thorium": "Steht nicht in der AM-Datenbank (Installation über 'am -e', mit Variante AVX/AVX2). Bitte oben unter 'Externes GitHub-AppImage' installieren; der Vorschlag aus der Systeminstallation steht dort.",
+    "thorium-browser": "Steht nicht in der AM-Datenbank (Installation über 'am -e', mit Variante AVX/AVX2). Bitte oben unter 'Externes GitHub-AppImage' installieren; der Vorschlag aus der Systeminstallation steht dort.",
 }
 
 # Dateisysteme, auf denen AppImages (Ausführrecht, Links) nicht zuverlässig laufen
@@ -407,6 +411,224 @@ def appman_install(download=False):
             "text": f"AppMan installiert nach {dest} (Quelle: {source}). ~/.local/bin muss im PATH stehen."}
 
 
+# ---------------------------------------------------------------------------
+# Suche und Installation beliebiger AM-Programme im Benutzerordner (kein root)
+# ---------------------------------------------------------------------------
+APP_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}$")
+SEARCH_TERM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,39}$")
+SEARCH_MAX = 60
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _am_binary():
+    return shutil.which("am") or shutil.which("appman")
+
+
+def _parse_am_list(text):
+    """Zerlegt die Ausgabe von 'am -q': Einträge beginnen mit '◆ name : Beschreibung', Folgezeilen sind eingerückt."""
+    entries, cur = [], None
+    for raw in ANSI_RE.sub("", text).splitlines():
+        m = re.match(r"^\s*◆\s+(\S+)\s*:\s*(.*)$", raw)
+        if m:
+            cur = {"name": m.group(1), "desc": m.group(2).strip()}
+            entries.append(cur)
+        elif cur is not None and raw.startswith("   ") and raw.strip():
+            cur["desc"] = (cur["desc"] + " " + raw.strip()).strip()
+        elif not raw.strip():
+            cur = None if not entries else cur
+    return entries
+
+
+def _installed_where(name):
+    user_dir = configured_user_dir()
+    if os.path.isfile(os.path.join(user_dir, name, "AM-updater")):
+        return "user"
+    if os.path.isfile(f"/opt/{name}/AM-updater"):
+        return "system"
+    return None
+
+
+def search_apps(term, appimages_only=True):
+    """Sucht in der AM-Datenbank (rein lesend). Rückgabe {ok, term, results[], truncated, error}."""
+    term = (term or "").strip()
+    if not SEARCH_TERM_RE.match(term):
+        return {"ok": False, "term": term, "results": [], "truncated": False,
+                "error": "Suchbegriff leer oder ungültig (erlaubt: Buchstaben, Ziffern, Leerzeichen, . _ + -; höchstens 40 Zeichen)."}
+    am = _am_binary()
+    if not am:
+        return {"ok": False, "term": term, "results": [], "truncated": False, "error": "Weder AM noch AppMan gefunden."}
+    args = [am, "-q"] + (["--appimages"] if appimages_only else []) + [term]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, LANG="C.UTF-8", TERM="dumb"))
+    except Exception as e:
+        return {"ok": False, "term": term, "results": [], "truncated": False, "error": f"Suche fehlgeschlagen: {e}"}
+    entries = [e for e in _parse_am_list(r.stdout) if APP_NAME_RE.match(e["name"])]
+    truncated = len(entries) > SEARCH_MAX
+    for e in entries[:SEARCH_MAX]:
+        e["installed"] = _installed_where(e["name"])
+        e["variants_note"] = e["name"] in EXCLUDED
+    return {"ok": True, "term": term, "results": entries[:SEARCH_MAX], "truncated": truncated, "error": ""}
+
+
+def _am_knows(name):
+    """Prüft über 'am -q --pkg', ob AM das Programm kennt (exakter Name)."""
+    am = _am_binary()
+    if not am or not APP_NAME_RE.match(name):
+        return False
+    try:
+        r = subprocess.run([am, "-q", "--pkg", name], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, LANG="C.UTF-8", TERM="dumb"))
+    except Exception:
+        return False
+    return any(e["name"] == name for e in _parse_am_list(r.stdout))
+
+
+def install_new(names):
+    """Installiert beliebige AM-Programme im Benutzerordner (kein root). Streamt JSON-Zeilen wie install_user."""
+    am = _am_cmd()
+    if not am:
+        _emit("fatal", text="Weder AM noch AppMan gefunden.")
+        return 2
+    target = configured_user_dir()
+    bad = [n for n in names if not APP_NAME_RE.match(n)]
+    if bad:
+        _emit("fatal", text="Ungültiger Name: " + ", ".join(bad))
+        return 2
+    unknown = [n for n in names if not _am_knows(n)]
+    if unknown:
+        _emit("fatal", text="AM kennt dieses Programm nicht: " + ", ".join(unknown))
+        return 2
+    chk = check_dir(target, 300 * 2 ** 20 * len(names))
+    if not chk["ok"]:
+        _emit("fatal", text="Zielordner ungeeignet: " + "; ".join(c["text"] for c in chk["checks"] if c["level"] == "fail"))
+        return 2
+    os.makedirs(target, exist_ok=True)
+    if not os.path.isfile(APPMAN_CONFIG):
+        _write_appman_config(target)
+    results, total = {}, len(names)
+    env = dict(os.environ, LANG="C.UTF-8", TERM="dumb")
+    for i, n in enumerate(names, 1):
+        if _installed_where(n) == "user":
+            results[n] = {"ok": True, "msgs": ["schon im Benutzerordner vorhanden"]}
+            _emit("app", app=n, ok=True, msgs=results[n]["msgs"])
+            continue
+        _emit("step", index=i, total=total, app=n, text=f"Installiere {n} im Benutzerordner …")
+        try:
+            r = subprocess.run(am[0] + ["-y", "-i"] + am[1] + [n], capture_output=True, text=True, timeout=1800, env=env,
+                               stdin=subprocess.DEVNULL)
+            lines = [l for l in ANSI_RE.sub("", r.stdout + r.stderr).strip().splitlines()
+                     if l.strip() and not re.search(r"\d+%|^[\s-]+$|^\s*\d+K ", l)][-3:]
+            for line in lines:
+                _emit("log", app=n, text=line)
+            if r.returncode != 0:
+                results[n] = {"ok": False, "msgs": [f"Installation Rückgabecode {r.returncode} (braucht das Programm eine Auswahl, z. B. eine Variante? Dann im Terminal installieren)"]}
+                _emit("app", app=n, ok=False, msgs=results[n]["msgs"])
+                continue
+        except Exception as e:
+            results[n] = {"ok": False, "msgs": [str(e)]}
+            _emit("app", app=n, ok=False, msgs=results[n]["msgs"])
+            continue
+        ok, msgs = verify_user_app(target, n)
+        results[n] = {"ok": ok, "msgs": msgs}
+        _emit("app", app=n, ok=ok, msgs=msgs)
+    _emit("result", target=target, results=results, verified=[n for n, v in results.items() if v["ok"]])
+    return 0
+
+
+
+# --- Externe GitHub-AppImages ('am -e'), z. B. Thorium mit Variante AVX2 ---
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$")
+KEYWORD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,39}$")
+_SKIP_KEYWORDS = {"appimage", "x86_64", "amd64", "linux", "zsync", "sha256"}
+
+
+def _normalize_repo(repo):
+    repo = (repo or "").strip()
+    m = re.match(r"^https?://github\.com/([^/\s]+/[^/\s#?]+?)(?:\.git)?/?$", repo)
+    return m.group(1) if m else repo
+
+
+def extra_hints():
+    """Systeminstallationen, die mit 'am -e' (außerhalb der AM-Datenbank) installiert wurden: Repo und Schlüsselwort
+    stehen im AM-updater. Rein lesend. Rückgabe [{name, repo, keyword}]."""
+    names = sorted(os.path.basename(os.path.dirname(p)) for p in glob.glob(SYSTEM_GLOB))
+    am = _am_binary()
+    known = set()
+    if am and names:
+        try:
+            r = subprocess.run([am, "-q", "--pkg"] + names, capture_output=True, text=True, timeout=60,
+                               stdin=subprocess.DEVNULL, env=dict(os.environ, LANG="C.UTF-8", TERM="dumb"))
+            known = {e["name"] for e in _parse_am_list(r.stdout)}
+        except Exception:
+            known = set(names)  # im Zweifel nichts vorschlagen
+    hints = []
+    for n in names:
+        if n in known or not APP_NAME_RE.match(n):
+            continue
+        try:
+            with open(f"/opt/{n}/AM-updater", encoding="utf-8", errors="replace") as f:
+                txt = f.read(20000)
+        except OSError:
+            continue
+        m = re.search(r'^SITE="([^"/\s]+/[^"\s]+)"', txt, re.M) or re.search(r"api\.github\.com/repos/([^/\s]+/[^/\s]+)/releases", txt)
+        if not m or not REPO_RE.match(m.group(1)):
+            continue
+        kws = [k for k in re.findall(r'grep -i "([A-Za-z0-9._+-]+)"', txt) if k.lower() not in _SKIP_KEYWORDS and KEYWORD_RE.match(k)]
+        hints.append({"name": n, "repo": m.group(1), "keyword": kws[0] if kws else ""})
+    return hints
+
+
+def install_extra(repo, name, keyword=""):
+    """Installiert ein GitHub-AppImage außerhalb der AM-Datenbank im Benutzerordner ('am -e --user'). Streamt JSON-Zeilen."""
+    am = _am_cmd()
+    repo = _normalize_repo(repo)
+    if not am:
+        _emit("fatal", text="Weder AM noch AppMan gefunden.")
+        return 2
+    if not REPO_RE.match(repo):
+        _emit("fatal", text="Ungültiges Repository (erwartet: nutzer/projekt oder die GitHub-Adresse).")
+        return 2
+    if not APP_NAME_RE.match(name or ""):
+        _emit("fatal", text="Ungültiger Programmname (erlaubt: Kleinbuchstaben, Ziffern, . _ + -).")
+        return 2
+    if keyword and not KEYWORD_RE.match(keyword):
+        _emit("fatal", text="Ungültiges Schlüsselwort.")
+        return 2
+    target = configured_user_dir()
+    chk = check_dir(target, 300 * 2 ** 20)
+    if not chk["ok"]:
+        _emit("fatal", text="Zielordner ungeeignet: " + "; ".join(c["text"] for c in chk["checks"] if c["level"] == "fail"))
+        return 2
+    if _installed_where(name) == "user":
+        _emit("fatal", text=f"{name} ist im Benutzerordner schon vorhanden.")
+        return 2
+    os.makedirs(target, exist_ok=True)
+    if not os.path.isfile(APPMAN_CONFIG):
+        _write_appman_config(target)
+    _emit("step", index=1, total=1, app=name, text=f"Installiere {name} von github.com/{repo}" + (f" (Variante {keyword})" if keyword else "") + " …")
+    env = dict(os.environ, LANG="C.UTF-8", TERM="dumb")
+    try:
+        r = subprocess.run(am[0] + ["-y", "-e"] + am[1] + [repo, name] + ([keyword] if keyword else []),
+                           capture_output=True, text=True, timeout=1800, env=env, stdin=subprocess.DEVNULL)
+        for line in [l for l in ANSI_RE.sub("", r.stdout + r.stderr).strip().splitlines()
+                     if l.strip() and not re.search(r"\d+%|^[\s-]+$|^\s*\d+K ", l)][-3:]:
+            _emit("log", app=name, text=line)
+        if r.returncode != 0:
+            _emit("app", app=name, ok=False, msgs=[f"Installation Rückgabecode {r.returncode}"])
+            _emit("result", target=target, results={name: {"ok": False, "msgs": []}}, verified=[])
+            return 0
+    except Exception as e:
+        _emit("app", app=name, ok=False, msgs=[str(e)])
+        _emit("result", target=target, results={name: {"ok": False, "msgs": [str(e)]}}, verified=[])
+        return 0
+    ok, msgs = verify_user_app(target, name)
+    _emit("app", app=name, ok=ok, msgs=msgs)
+    _emit("result", target=target, results={name: {"ok": ok, "msgs": msgs}}, verified=[name] if ok else [])
+    return 0
+
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -429,6 +651,14 @@ def main(argv):
         print(json.dumps(remove_system_script(argv[1:]), ensure_ascii=False))
     elif cmd == "--appman-install":
         print(json.dumps(appman_install("--download" in argv), ensure_ascii=False))
+    elif cmd == "--am-search" and len(argv) > 1:
+        print(json.dumps(search_apps(argv[1], appimages_only="--all" not in argv), ensure_ascii=False))
+    elif cmd == "--am-install-new" and len(argv) > 1:
+        return install_new(argv[1:])
+    elif cmd == "--am-extra-hints":
+        print(json.dumps(extra_hints(), ensure_ascii=False))
+    elif cmd == "--am-install-extra" and len(argv) > 2:
+        return install_extra(argv[1], argv[2], argv[3] if len(argv) > 3 else "")
     elif cmd == "--am-verify" and len(argv) > 2:
         ok, msgs = verify_user_app(os.path.abspath(os.path.expanduser(argv[1])), argv[2])
         print(json.dumps({"ok": ok, "msgs": msgs}, ensure_ascii=False))

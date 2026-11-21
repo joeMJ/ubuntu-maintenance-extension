@@ -1,6 +1,7 @@
 /**
- * am-page.js - Einstellungsseite 'AppImages (AM)': Status, Zielordner mit Rechteprüfung, Umzugsliste.
- * Stufe 2: nur Ansicht (liest über am_tool.py, ändert nichts am System).
+ * am-page.js - Einstellungsseite 'AppImages (AM)': Status, Zielordner mit Rechteprüfung, Suche und Installation im
+ * Benutzerordner, externe GitHub-AppImages, Umzugsliste. Alle Änderungen laufen über am_tool.py (ohne Administratorrechte;
+ * nur das Entfernen von Systemversionen braucht eine Anmeldung).
  */
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
@@ -103,6 +104,33 @@ export function buildAmPage(window, extPath) {
     gDir.add(dirRow);
     let checkRows = [];
 
+    // --- Suchen und installieren (Benutzerordner, kein root) ---
+    const gSearch = new Adw.PreferencesGroup({ title: 'AppImage suchen und installieren',
+        description: 'Suche in der AM-Datenbank. Installiert wird im Benutzerordner, ohne Administratorrechte; Aktualisieren geht danach ebenfalls ohne Anmeldung.' });
+    page.add(gSearch);
+    const searchRow = new Adw.EntryRow({ title: 'Suchbegriff (Enter startet die Suche)' });
+    const searchBtn = new Gtk.Button({ label: 'Suchen', valign: Gtk.Align.CENTER });
+    searchRow.add_suffix(searchBtn);
+    gSearch.add(searchRow);
+    const searchInfo = new Adw.ActionRow({ title: 'Noch keine Suche', subtitle: '', activatable: false });
+    gSearch.add(searchInfo);
+    let searchRows = [];
+    const installBtns = [];
+
+    // --- Externe GitHub-AppImages (am -e) ---
+    const gExtra = new Adw.PreferencesGroup({ title: 'Externes GitHub-AppImage',
+        description: 'Für Programme, die nicht in der AM-Datenbank stehen (z. B. Thorium). Repository, Name und bei mehreren Varianten ein Schlüsselwort (z. B. AVX2).' });
+    page.add(gExtra);
+    const repoRow = new Adw.EntryRow({ title: 'Repository (nutzer/projekt oder GitHub-Adresse)' });
+    const nameRow = new Adw.EntryRow({ title: 'Programmname (Kleinbuchstaben, z. B. thorium)' });
+    const kwRow = new Adw.EntryRow({ title: 'Schlüsselwort der Variante (optional, z. B. AVX2)' });
+    [repoRow, nameRow, kwRow].forEach(r => gExtra.add(r));
+    const extraBtnRow = new Adw.ActionRow({ title: 'Installieren', subtitle: 'Im Benutzerordner, danach wird die App geprüft.', activatable: false });
+    const extraBtn = new Gtk.Button({ label: 'Installieren …', valign: Gtk.Align.CENTER, css_classes: ['suggested-action'] });
+    extraBtnRow.add_suffix(extraBtn);
+    gExtra.add(extraBtnRow);
+    let hintRows = [];
+
     // --- Programme ---
     const gApps = new Adw.PreferencesGroup({ title: 'Programme', description: 'Auswahl für den Umzug. Nichts wird verändert, solange du nicht ausdrücklich startest.' });
     page.add(gApps);
@@ -142,7 +170,14 @@ export function buildAmPage(window, extPath) {
         logView.scroll_to_mark(b.create_mark(null, b.get_end_iter(), false), 0, false, 0, 0);
     };
     let busy = false;
-    const setBusy = v => { busy = v; startBtn.sensitive = !v && state.plan?.dir_check.ok && state.selected.size > 0; chooseBtn.sensitive = !v; };
+    const setBusy = v => {
+        busy = v;
+        startBtn.sensitive = !v && state.plan?.dir_check.ok && state.selected.size > 0;
+        chooseBtn.sensitive = !v;
+        searchBtn.sensitive = !v;
+        extraBtn.sensitive = !v;
+        installBtns.forEach(b => { b.sensitive = !v; });
+    };
 
     const gRemove = new Adw.PreferencesGroup({ visible: false });
     page.add(gRemove);
@@ -151,6 +186,36 @@ export function buildAmPage(window, extPath) {
     removeRow.add_suffix(removeBtn);
     gRemove.add(removeRow);
     let verified = [];
+
+    // Führt am_tool.py mit JSON-Zeilenausgabe aus und füllt Fortschritt und Protokoll. Rückgabe {rc, failed}.
+    const streamInstall = async (args, total) => {
+        setBusy(true);
+        gRun.visible = true; gRemove.visible = false; verified = [];
+        logView.buffer.text = '';
+        runBar.fraction = 0; runBar.text = 'Starte …';
+        const failed = [];
+        const rc = await streamProc(['python3', '-I', GLib.build_filenamev([extPath, 'am_tool.py']), ...args], line => {
+            let m; try { m = JSON.parse(line); } catch (_e) { log(line); return; }
+            if (m.kind === 'step') { runBar.fraction = (m.index - 1) / m.total; runBar.text = `${m.index} von ${m.total}: ${m.app}`; log(m.text); }
+            else if (m.kind === 'log') log('   ' + m.text);
+            else if (m.kind === 'app') { log(m.ok ? `   ✔ ${m.app} installiert und geprüft` : `   ✘ ${m.app}: ${m.msgs.join('; ')}`); if (m.ok && m.msgs.length) log('   Hinweis: ' + m.msgs.join('; ')); if (!m.ok) failed.push(m.app); }
+            else if (m.kind === 'fatal') log(`FEHLER: ${m.text}`);
+            else if (m.kind === 'result') verified = m.verified;
+        });
+        runBar.fraction = 1;
+        runBar.text = rc === 0 ? `Fertig: ${verified.length} von ${total} geprüft` : 'Abgebrochen';
+        log(rc === 0 ? `\nErgebnis: ${verified.length} Programme installiert und geprüft, ${failed.length} mit Problemen.` : '\nDer Lauf wurde nicht ausgeführt (siehe oben).');
+        setBusy(false);
+        // Systemversionen derselben Programme können jetzt entfernt werden (nur wenn es welche gibt)
+        const sys = new Set(state.plan?.status.system_apps ?? []);
+        const removable = verified.filter(n => sys.has(n));
+        if (removable.length) {
+            removeRow.subtitle = esc(`${removable.length} Programme sind im Benutzerordner geprüft und haben noch eine Systemversion in /opt. Sie kann jetzt entfernt werden (eine Anmeldung, Skript einsehbar).`);
+            gRemove.visible = true;
+        }
+        load(state.dir);
+        return { rc, failed };
+    };
 
     const doInstall = async () => {
         const names = [...state.selected];
@@ -164,29 +229,88 @@ export function buildAmPage(window, extPath) {
             `• Download je App, zusammen ca. ${mb(plan.apps.filter(a => state.selected.has(a.name)).reduce((s, a) => s + a.size, 0))}.`,
         ].join('\n');
         if (!await confirm(window, 'Installation im Benutzerordner starten?', body, 'Installieren')) return;
-        setBusy(true);
-        gRun.visible = true; gRemove.visible = false; verified = [];
-        logView.buffer.text = '';
-        runBar.fraction = 0; runBar.text = 'Starte …';
-        const failed = [];
-        const rc = await streamProc(['python3', '-I', GLib.build_filenamev([extPath, 'am_tool.py']), '--am-install', plan.target, ...names], line => {
-            let m; try { m = JSON.parse(line); } catch (_e) { log(line); return; }
-            if (m.kind === 'step') { runBar.fraction = (m.index - 1) / m.total; runBar.text = `${m.index} von ${m.total}: ${m.app}`; log(m.text); }
-            else if (m.kind === 'log') log('   ' + m.text);
-            else if (m.kind === 'app') { log(m.ok ? `   ✔ ${m.app} installiert und geprüft` : `   ✘ ${m.app}: ${m.msgs.join('; ')}`); if (m.ok && m.msgs.length) log('   Hinweis: ' + m.msgs.join('; ')); if (!m.ok) failed.push(m.app); }
-            else if (m.kind === 'fatal') log(`FEHLER: ${m.text}`);
-            else if (m.kind === 'result') verified = m.verified;
-        });
-        runBar.fraction = 1;
-        runBar.text = rc === 0 ? `Fertig: ${verified.length} von ${names.length} geprüft` : 'Abgebrochen';
-        log(rc === 0 ? `\nErgebnis: ${verified.length} Programme installiert und geprüft, ${failed.length} mit Problemen.` : '\nDer Lauf wurde nicht ausgeführt (siehe oben).');
-        setBusy(false);
-        if (verified.length) {
-            removeRow.subtitle = esc(`${verified.length} Programme sind im Benutzerordner geprüft. Die Systemversionen in /opt können jetzt entfernt werden (eine Anmeldung, Skript einsehbar).`);
-            gRemove.visible = true;
-        }
+        await streamInstall(['--am-install', plan.target, ...names], names.length);
     };
     startBtn.connect('clicked', () => { if (!busy) doInstall(); });
+
+    // --- Suche ---
+    const doSearch = async () => {
+        const term = searchRow.text.trim();
+        if (!term) { searchInfo.title = 'Bitte einen Suchbegriff eingeben'; return; }
+        searchBtn.sensitive = false;
+        searchInfo.title = 'Suche läuft …'; searchInfo.subtitle = '';
+        searchRows.forEach(r => gSearch.remove(r)); searchRows = [];
+        installBtns.length = 0;
+        let res;
+        try { res = await runTool(extPath, ['--am-search', term]); } catch (e) { res = { ok: false, error: e.message, results: [] }; }
+        searchBtn.sensitive = !busy;
+        if (!res.ok) { searchInfo.title = 'Suche nicht möglich'; searchInfo.subtitle = esc(res.error); return; }
+        searchInfo.title = res.results.length ? `${res.results.length} Treffer für „${res.term}“` : `Keine Treffer für „${res.term}“`;
+        searchInfo.subtitle = esc(res.truncated ? 'Nur die ersten Treffer werden gezeigt, bitte genauer suchen.'
+            : (res.results.length ? '' : 'Nicht in der AM-Datenbank? Dann unten ein externes GitHub-AppImage eintragen.'));
+        searchRows = res.results.map(e => {
+            const desc = e.desc.length > 220 ? e.desc.slice(0, 217) + '…' : e.desc;
+            const row = new Adw.ActionRow({ title: esc(e.name), subtitle: esc(desc), subtitle_lines: 3, activatable: false });
+            if (e.installed === 'user') {
+                row.add_suffix(new Gtk.Label({ label: 'im Benutzerordner', css_classes: ['dim-label'], valign: Gtk.Align.CENTER }));
+            } else {
+                const btn = new Gtk.Button({ label: e.installed === 'system' ? 'Zusätzlich als Benutzer installieren' : 'Installieren', valign: Gtk.Align.CENTER, sensitive: !busy });
+                btn.connect('clicked', () => { if (!busy) doInstallNew(e); });
+                installBtns.push(btn);
+                row.add_suffix(btn);
+            }
+            gSearch.add(row);
+            return row;
+        });
+    };
+    searchBtn.connect('clicked', doSearch);
+    searchRow.connect('entry-activated', doSearch);
+
+    const doInstallNew = async e => {
+        const body = [
+            `„${e.name}“ wird im Benutzerordner installiert:`,
+            `• Zielordner: ${state.plan?.target ?? ''}`,
+            '• Ohne Administratorrechte; nichts in /opt oder /usr wird verändert.',
+            '• Danach wird die App geprüft (Datei, Updater, Link, Start).',
+            e.installed === 'system' ? '• Es gibt schon eine Systemversion in /opt; sie bleibt bestehen, bis du sie selbst entfernst.' : '',
+            e.variants_note ? '• Dieses Programm gibt es in mehreren Varianten; bitte unten als externes GitHub-AppImage mit Schlüsselwort installieren.' : '',
+        ].filter(Boolean).join('\n');
+        if (!await confirm(window, 'Im Benutzerordner installieren?', body, 'Installieren')) return;
+        await streamInstall(['--am-install-new', e.name], 1);
+        doSearch();
+    };
+
+    // --- Externes GitHub-AppImage ---
+    const loadHints = async () => {
+        let hints = [];
+        try { hints = await runTool(extPath, ['--am-extra-hints']); } catch (_e) { /* optional */ }
+        hintRows.forEach(r => gExtra.remove(r)); hintRows = [];
+        hintRows = hints.map(h => {
+            const r = new Adw.ActionRow({ title: esc(`Vorschlag aus der Systeminstallation: ${h.name}`),
+                subtitle: esc(`${h.repo}${h.keyword ? ' · Variante ' + h.keyword : ''}`), activatable: false });
+            const b = new Gtk.Button({ label: 'Übernehmen', valign: Gtk.Align.CENTER });
+            b.connect('clicked', () => { repoRow.text = h.repo; nameRow.text = h.name; kwRow.text = h.keyword; });
+            r.add_suffix(b);
+            gExtra.add(r);
+            return r;
+        });
+        // Reihenfolge: Vorschläge zuerst, dann die Eingabefelder und der Installieren-Knopf
+        [repoRow, nameRow, kwRow, extraBtnRow].forEach(r => { gExtra.remove(r); gExtra.add(r); });
+    };
+    extraBtn.connect('clicked', async () => {
+        if (busy) return;
+        const repo = repoRow.text.trim(), name = nameRow.text.trim(), kw = kwRow.text.trim();
+        if (!repo || !name) { extraBtnRow.subtitle = 'Bitte Repository und Programmnamen ausfüllen.'; return; }
+        extraBtnRow.subtitle = 'Im Benutzerordner, danach wird die App geprüft.';
+        const body = [
+            `„${name}“ wird von github.com/${repo.replace(/^https?:\/\/github\.com\//, '')} im Benutzerordner installiert${kw ? ' (Variante ' + kw + ')' : ''}.`,
+            `• Zielordner: ${state.plan?.target ?? ''}`,
+            '• Ohne Administratorrechte; nichts in /opt oder /usr wird verändert.',
+            '• Quelle ist das neueste GitHub-Release, ohne Prüfsumme der Datenbank: nur für Quellen, denen du vertraust.',
+        ].join('\n');
+        if (!await confirm(window, 'Externes AppImage installieren?', body, 'Installieren')) return;
+        await streamInstall(['--am-install-extra', repo, name, ...(kw ? [kw] : [])], 1);
+    });
 
     const doRemove = async () => {
         if (!verified.length) return;
@@ -317,5 +441,6 @@ export function buildAmPage(window, extPath) {
     });
 
     load(null);
+    loadHints();
     return page;
 }

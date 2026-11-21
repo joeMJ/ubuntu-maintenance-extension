@@ -180,21 +180,44 @@ def check_snap():
         pass
     return result
 
-def check_flatpak():
-    result = {"count": 0, "packages": []}
-    try:
-        res = subprocess.run(
-            ["flatpak", "remote-ls", "--updates"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            env=dict(os.environ, LANG="C.UTF-8")
-        )
-        lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-        result["count"] = len(lines)
-        result["packages"] = lines
-    except Exception:
-        pass
+FLATPAK_REF_RE = re.compile(r"^(app|runtime)/[A-Za-z0-9._-]+/[A-Za-z0-9_]+/[A-Za-z0-9._-]+$")
+
+
+def check_flatpak(timeout=45):
+    """Flatpak-Updates getrennt nach Systeminstallation und Benutzerinstallation (rein lesend).
+
+    details: [{installation, ref, application, name, version, origin, kind, branch}]; packages bleibt als Textliste
+    für die Menüanzeige erhalten. errors: Installationen, deren Abfrage fehlschlug (z. B. kein Netz)."""
+    result = {"count": 0, "packages": [], "details": [], "errors": []}
+    if not shutil.which("flatpak"):
+        return result
+    for inst in ("system", "user"):
+        try:
+            res = subprocess.run(["flatpak", "remote-ls", "--updates", f"--{inst}", "--columns=ref,application,version,origin,name"],
+                                 capture_output=True, text=True, timeout=timeout, env=dict(os.environ, LANG="C.UTF-8"))
+        except Exception as e:
+            result["errors"].append({"installation": inst, "error": str(e)})
+            continue
+        if res.returncode != 0:
+            err = (res.stderr or "").strip().splitlines()
+            result["errors"].append({"installation": inst, "error": err[-1] if err else f"Rückgabecode {res.returncode}"})
+            continue
+        for line in res.stdout.splitlines():
+            parts = [x.strip() for x in line.split("\t")]
+            if len(parts) < 2 or not FLATPAK_REF_RE.match(parts[0]):
+                continue
+            ref = parts[0]
+            kind, _, _, branch = ref.split("/")
+            app = parts[1] or ref.split("/")[1]
+            ver = parts[2] if len(parts) > 2 else ""
+            origin = parts[3] if len(parts) > 3 else ""
+            name = (parts[4] if len(parts) > 4 else "") or app
+            result["details"].append({"installation": inst, "ref": ref, "application": app, "name": name, "version": ver,
+                                      "origin": origin, "kind": kind, "branch": branch})
+    result["count"] = len(result["details"])
+    label = {"system": "System", "user": "Benutzer"}
+    result["packages"] = [f"{d['name']} {d['version'] or d['branch']} ({label[d['installation']]})".replace("  ", " ")
+                          for d in result["details"]]
     return result
 
 APPIMAGE_CACHE_FILE = os.path.expanduser("~/.local/state/ubuntu-maintenance-indicator/appimage_cache.json")
@@ -1375,14 +1398,19 @@ def build_update_plan(cfg, force_appimages=False, sim_override=None):
                               "selected": True, "selectable": True, "badge": "läuft" if d.get("running") else None,
                               "badge_kind": "warn" if d.get("running") else None} for d in snap_res.get("details", [])]})
     fp_items = []
-    for line in flat_res.get("packages", []):
-        parts = [x.strip() for x in line.split("\t")] if "\t" in line else line.split(None, 2)
-        name = parts[0] if parts else line
-        app_id = parts[1] if len(parts) > 1 else ""
-        ver = parts[2] if len(parts) > 2 else ""
-        fp_items.append({"id": f"flatpak:{app_id or name}", "name": name, "subtitle": " · ".join(x for x in (app_id, ver) if x),
-                         "selected": True, "selectable": True, "badge": None, "badge_kind": None})
-    groups.append({"id": "flatpak", "title": "Flatpak", "auth": "none", "items": fp_items, "empty": "Keine Flatpak-Updates."})
+    inst_label = {"system": "System", "user": "Benutzer"}
+    for d in flat_res.get("details", []):
+        sub = [inst_label.get(d["installation"], d["installation"]), d["application"]]
+        sub.append(d["version"] or f"Zweig {d['branch']}")
+        if d["kind"] == "runtime":
+            sub.append("Laufzeit")
+        fp_items.append({"id": f"flatpak:{d['installation']}:{d['ref']}", "name": d["name"], "subtitle": " · ".join(x for x in sub if x),
+                         "selected": True, "selectable": True,
+                         "badge": inst_label.get(d["installation"]), "badge_kind": None})
+    fp_note = "; ".join(f"{inst_label.get(e['installation'], e['installation'])}: nicht prüfbar ({e['error']})" for e in flat_res.get("errors", []))
+    groups.append({"id": "flatpak", "title": "Flatpak", "auth": "none", "items": fp_items, "empty": "Keine Flatpak-Updates.",
+                   "note": "System- und Benutzerinstallation getrennt, beide ohne Anmeldung." + (f" {fp_note}" if fp_note else ""),
+                   "warning": fp_note and "Mindestens eine Flatpak-Installation konnte nicht geprüft werden." or ""})
     fw_items = []
     for d in fw_res.get("details", []):
         rel = (d.get("Releases") or [{}])[0]
