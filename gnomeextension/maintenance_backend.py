@@ -1409,7 +1409,7 @@ def build_update_plan(cfg, force_appimages=False, sim_override=None):
                          "badge": inst_label.get(d["installation"]), "badge_kind": None})
     fp_note = "; ".join(f"{inst_label.get(e['installation'], e['installation'])}: nicht prüfbar ({e['error']})" for e in flat_res.get("errors", []))
     groups.append({"id": "flatpak", "title": "Flatpak", "auth": "none", "items": fp_items, "empty": "Keine Flatpak-Updates.",
-                   "note": "System- und Benutzerinstallation getrennt, beide ohne Anmeldung." + (f" {fp_note}" if fp_note else ""),
+                   "note": "System- und Benutzerinstallation getrennt, in der Regel ohne Anmeldung (in Remote-Sitzungen einmal für die System-Installation)." + (f" {fp_note}" if fp_note else ""),
                    "warning": fp_note and "Mindestens eine Flatpak-Installation konnte nicht geprüft werden." or ""})
     fw_items = []
     for d in fw_res.get("details", []):

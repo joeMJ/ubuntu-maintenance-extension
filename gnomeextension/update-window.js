@@ -181,17 +181,26 @@ function buildWindow(app) {
         const REF_RE = /^(app|runtime)\/[A-Za-z0-9._-]+\/[A-Za-z0-9_]+\/[A-Za-z0-9._-]+$/;
         for (const [inst, label] of [['system', 'System'], ['user', 'Benutzer']]) {
             const refs = ids.filter(i => i.startsWith(`flatpak:${inst}:`)).map(i => i.slice(`flatpak:${inst}:`.length)).filter(r => REF_RE.test(r));
-            if (refs.length) steps.push({ title: `Flatpak (${label}) aktualisieren: ${refs.length}`, argv: ['flatpak', 'update', `--${inst}`, '-y', '--noninteractive', ...refs] });
+            if (refs.length) {
+                const fp = GLib.find_program_in_path('flatpak') ?? 'flatpak';
+                const step = { title: `Flatpak (${label}) aktualisieren: ${refs.length}`, argv: [fp, 'update', `--${inst}`, '-y', '--noninteractive', ...refs] };
+                // System-Installation: Falls polkit dem Benutzer die Aktion verweigert (z. B. RDP-Sitzung ohne aktive lokale
+                // Sitzung), wird der Schritt einmal mit einer Anmeldung (pkexec) wiederholt.
+                if (inst === 'system') step.retryArgv = [RUNNER, fp, 'update', '--system', '-y', '--noninteractive', ...refs];
+                steps.push(step);
+            }
         }
         const am = GLib.find_program_in_path('am') ?? GLib.find_program_in_path('appman') ?? 'am';
         for (const id of ids.filter(i => i.startsWith('appimage:'))) {
             const name = id.slice(9);
             steps.push({ title: `AppImage ${name} aktualisieren`, argv: [am, '-y', '-u', name] });
         }
-        return FAKE_USER ? steps.map(s => ({ ...s, argv: ['/bin/sh', '-c', 'echo FAKE "$@"', 'x', ...s.argv] })) : steps;
+        return FAKE_USER ? steps.map(s => ({ ...s, retryArgv: undefined, argv: ['/bin/sh', '-c', 'echo FAKE "$@"', 'x', ...s.argv] })) : steps;
     }
 
+    let lastOutput = '';
     function runOne(argv) {
+        lastOutput = '';
         return new Promise(resolve => {
             let proc;
             try {
@@ -206,6 +215,7 @@ function buildWindow(app) {
                     return;
                 }
                 const line = new TextDecoder('utf-8', { fatal: false }).decode(bytes).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\r/g, '');
+                lastOutput += line + '\n';
                 if (line.trim() && !/\d+%|^[\s-]+$|^\s*\d+K /.test(line)) logLine('   ' + line);
                 loop();
             });
@@ -222,7 +232,12 @@ function buildWindow(app) {
             logLine(`— ${steps[i].title} —`);
             progress.pulse();
             const pulse = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => { progress.pulse(); return GLib.SOURCE_CONTINUE; });
-            const rc = await runOne(steps[i].argv);
+            let rc = await runOne(steps[i].argv);
+            if (rc !== 0 && steps[i].retryArgv && /not allowed for user/i.test(lastOutput)) {
+                logLine('   ℹ Für die System-Installation fehlt dem Benutzer die Berechtigung (z. B. Remote-Sitzung).');
+                logLine('   ℹ Der Schritt wird einmal mit Administrator-Anmeldung wiederholt.');
+                rc = await runOne(steps[i].retryArgv);
+            }
             GLib.source_remove(pulse);
             progress.fraction = (i + 1) / steps.length;
             if (rc !== 0) { failed.push(steps[i].title); logLine(`   ✘ Rückgabecode ${rc}`); } else logLine('   ✔ fertig');
@@ -325,7 +340,7 @@ function buildWindow(app) {
         const userIds = selected.filter(isUserId);
         const userLines = [];
         const nFp = userIds.filter(i => i.startsWith('flatpak:')).length, nAi = userIds.filter(i => i.startsWith('appimage:')).length;
-        if (nFp) userLines.push(`• ${nFp} Flatpak${nFp === 1 ? '' : 's'} aktualisieren (ohne Anmeldung)`);
+        if (nFp) userLines.push(`• ${nFp} Flatpak${nFp === 1 ? '' : 's'} aktualisieren (in der Regel ohne Anmeldung; in Remote-Sitzungen fragt das Fenster bei der System-Installation einmal)`);
         if (nAi) userLines.push(`• ${nAi} AppImage${nAi === 1 ? '' : 's'} per AM aktualisieren (ohne Anmeldung)`);
         if (rootIds.length === 0) {
             await runUserOnly(userIds, userLines.join('\n') + '\n   (' + selectedNames.slice(0, 8).join(', ') + (selectedNames.length > 8 ? ' …' : '') + ')');
