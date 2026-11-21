@@ -96,6 +96,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
         this._sidecarHideTimeout = null;
         this._hoverSidecar = null;
         this._isChecking = false;
+        this._checkingCats = new Set();  // Update-Bereiche, die gerade einzeln geprüft werden
         this._lastData = null;
         this._lastState = null;
         this._remoteUpdateInfo = null;
@@ -343,6 +344,68 @@ export default class UbuntuMaintenanceExtension extends Extension {
             this._isChecking = false;
             console.error(`[ubuntu-maintenance] Subprocess launch error: ${e.message}`);
         }
+    }
+
+    // Teilprüfung einzelner Update-Bereiche (Klick auf 'System-Updates' oder eine Zeile darunter).
+    // Das Menü bleibt offen; die betroffenen Zeilen zeigen während der Prüfung das Aktualisieren-Symbol.
+    _checkUpdateCategories(cats) {
+        const todo = cats.filter(c => !this._checkingCats.has(c));
+        if (todo.length === 0 || this._isChecking) return;
+        todo.forEach(c => this._checkingCats.add(c));
+        if (this._lastData) this._rebuildMenu(this._lastData);
+        try {
+            const launcher = new Gio.SubprocessLauncher({
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
+            });
+            const aiHours = this._settings ? this._settings.get_int('appimage-check-interval-hours') : 24;
+            launcher.setenv('UM_APPIMAGE_INTERVAL_HOURS', String(aiHours), true);
+            // Ein ausdrücklicher Klick fragt die AppImages neu ab (ersetzt den früheren Eintrag 'AppImages jetzt prüfen')
+            launcher.setenv('UM_APPIMAGE_FORCE', todo.includes('appimages') ? '1' : '0', true);
+            const proc = launcher.spawnv(['/usr/bin/python3', this._backendScript, '--check-updates', ...todo]);
+            proc.communicate_utf8_async(null, null, (source, res) => {
+                todo.forEach(c => this._checkingCats.delete(c));
+                try {
+                    const [, stdout, stderr] = source.communicate_utf8_finish(res);
+                    if (!stdout) throw new Error(stderr || 'keine Ausgabe');
+                    this._applyPartialResults(JSON.parse(stdout));
+                } catch (e) {
+                    console.error(`[ubuntu-maintenance] Teilprüfung fehlgeschlagen: ${e.message}`);
+                    if (this._lastData) this._rebuildMenu(this._lastData);
+                }
+            });
+        } catch (e) {
+            todo.forEach(c => this._checkingCats.delete(c));
+            console.error(`[ubuntu-maintenance] Teilprüfung nicht gestartet: ${e.message}`);
+            if (this._lastData) this._rebuildMenu(this._lastData);
+        }
+    }
+
+    // Ergebnis einer Teilprüfung in den letzten Gesamtstand einarbeiten (Summe und Gesamtstatus neu berechnen)
+    _applyPartialResults(part) {
+        const data = this._lastData ? JSON.parse(JSON.stringify(this._lastData)) : { security_alerts: [], security: {}, updates: {} };
+        data.updates = data.updates || {};
+        for (const c of part.checked || [])
+            data.updates[c] = part[c];
+        if (part.reboot) data.updates.reboot = part.reboot;
+        // Zeitpunkt je Bereich merken (Fußzeile 'Zuletzt geprüft' im Ausklapp-Fenster)
+        data.checked_at = { ...(data.checked_at || {}) };
+        if (part.timestamp) {
+            for (const c of part.checked || [])
+                data.checked_at[c] = part.timestamp;
+            if (part.reboot) data.checked_at.reboot = part.timestamp;
+        }
+        if (part.blocked_snaps) data.blocked_snaps = part.blocked_snaps;
+        const u = data.updates;
+        u.total = (u.apt?.total || 0) + (u.snap?.count || 0) + (u.flatpak?.count || 0) +
+            (u.appimages?.count || 0) + (u.gext?.count || 0) + (u.firmware?.count || 0);
+        const alerts = data.security_alerts || [];
+        data.overall_state = alerts.length ? 'CRITICAL' : ((u.total > 0 || u.reboot?.required) ? 'UPDATES' : 'OK');
+        this._applyCheckResults(data);
+    }
+
+    // Symbol einer Update-Zeile: während einer Teilprüfung das Aktualisieren-Symbol
+    _rowIcon(type, iconName) {
+        return this._checkingCats.has(type) ? 'view-refresh-symbolic' : iconName;
     }
 
     _applyCheckResults(data) {
@@ -679,7 +742,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
                 });
                 if (ai.checked_at) {
                     const when = GLib.DateTime.new_from_unix_local(ai.checked_at).format('%d.%m. %H:%M');
-                    listContainer.add_child(new St.Label({ text: `Stand: ${when} (Prüfintervall ${ai.interval_hours} h, Menüeintrag „AppImages jetzt prüfen“ erzwingt eine neue Abfrage)`, style: `color: ${dimmedColor}; font-size: 10px; margin-top: 8px;` }));
+                    listContainer.add_child(new St.Label({ text: `Stand: ${when} (Prüfintervall ${ai.interval_hours} h, Klick auf die Zeile „AppImages (AM)“ fragt neu ab)`, style: `color: ${dimmedColor}; font-size: 10px; margin-top: 8px;` }));
                 }
                 if ((ai.count || 0) > 0) {
                     listContainer.add_child(new St.Label({ text: 'Aktualisieren: Menüeintrag „AppImages aktualisieren“ unten im Hauptmenü.', style: `color: ${dimmedColor}; font-size: 10px; margin-top: 8px;` }));
@@ -867,6 +930,28 @@ export default class UbuntuMaintenanceExtension extends Extension {
             }
             sidecar.add_child(listContainer);
         }
+
+        // Fußzeile: wann dieser Bereich zuletzt geprüft wurde (AppImages hat eine eigene 'Stand'-Zeile)
+        if (type !== 'appimages') {
+            const when = this._checkedAtText(type);
+            if (when) {
+                sidecar.add_child(new St.Label({
+                    text: `Zuletzt geprüft: ${when}`,
+                    style: `color: ${dimmedColor}; font-size: 10px; margin-top: 10px;`,
+                }));
+            }
+        }
+    }
+
+    // Zeitpunkt der letzten Prüfung eines Bereichs als 'TT.MM. HH:MM' (Teilprüfung, sonst Vollprüfung)
+    _checkedAtText(type) {
+        const data = this._lastData || {};
+        const iso = (data.checked_at && data.checked_at[type]) || data.timestamp;
+        if (!iso) return '';
+        const dt = new Date(iso);
+        if (isNaN(dt.getTime())) return '';
+        const p = n => String(n).padStart(2, '0');
+        return `${p(dt.getDate())}.${p(dt.getMonth() + 1)}. ${p(dt.getHours())}:${p(dt.getMinutes())}`;
     }
 
     _addSidecarHeader(sidecar, iconName, title, subtitle, textColor, dimmedColor) {
@@ -1196,7 +1281,11 @@ export default class UbuntuMaintenanceExtension extends Extension {
         });
 
         // Topic Header
-        const upHeaderRow = new St.BoxLayout({ vertical: false, y_align: Clutter.ActorAlign.CENTER, style: 'margin-bottom: 6px;' });
+        const upHeaderRow = new St.BoxLayout({ vertical: false, y_align: Clutter.ActorAlign.CENTER, style: 'margin-bottom: 6px;',
+            reactive: true, can_focus: true, track_hover: true, style_class: 'maint-interactive-row' });
+        // Klick auf die Überschrift prüft alle angezeigten Update-Bereiche
+        const allCats = ['apt', 'snap', 'flatpak', ...(appimages.available ? ['appimages'] : []), ...(gext.available ? ['gext'] : []), 'firmware'];
+        this._connectRowClick(upHeaderRow, () => this._checkUpdateCategories(allCats));
         const upIcon = new St.Icon({
             icon_name: 'software-update-available-symbolic',
             icon_size: 18,
@@ -1224,19 +1313,21 @@ export default class UbuntuMaintenanceExtension extends Extension {
             aptCol = aptSec > 0 ? statusRed : statusOrange;
             aptText = aptSec > 0 ? `{${aptSec} Sicherheit, ${aptNorm} Regulär}` : `{${aptNorm} Updates}`;
         }
-        const aptRow = this._createInteractiveRow('package-x-generic-symbolic', 'APT Pakete', aptText, aptCol, textColor, 'apt', isDark);
+        const aptRow = this._createInteractiveRow(this._rowIcon('apt', 'package-x-generic-symbolic'), 'APT Pakete', aptText, aptCol, textColor, 'apt', isDark, '', () => this._checkUpdateCategories(['apt']));
         card3Box.add_child(aptRow);
 
         // Zeile 2: Snap Pakete
         const snapCount = snap.count || 0;
         const snapRow = this._createInteractiveRow(
-            'system-software-install-symbolic',
+            this._rowIcon('snap', 'system-software-install-symbolic'),
             'Snap Pakete',
             snapCount > 0 ? `{${snapCount} Ausstehend}` : '{Alles aktuell}',
             snapCount > 0 ? statusOrange : statusGreen,
             textColor,
             'snap',
-            isDark
+            isDark,
+            '',
+            () => this._checkUpdateCategories(['snap'])
         );
         card3Box.add_child(snapRow);
 
@@ -1275,13 +1366,15 @@ export default class UbuntuMaintenanceExtension extends Extension {
         // Zeile 3: Flatpak Apps
         const flatpakCount = flatpak.count || 0;
         const flatpakRow = this._createInteractiveRow(
-            'application-x-executable-symbolic',
+            this._rowIcon('flatpak', 'application-x-executable-symbolic'),
             'Flatpak Apps',
             flatpakCount > 0 ? `{${flatpakCount} Ausstehend}` : '{Alles aktuell}',
             flatpakCount > 0 ? statusOrange : statusGreen,
             textColor,
             'flatpak',
-            isDark
+            isDark,
+            '',
+            () => this._checkUpdateCategories(['flatpak'])
         );
         card3Box.add_child(flatpakRow);
 
@@ -1289,13 +1382,15 @@ export default class UbuntuMaintenanceExtension extends Extension {
         if (appimages.available) {
             const aiCount = appimages.count || 0;
             const aiRow = this._createInteractiveRow(
-                'package-x-generic-symbolic',
+                this._rowIcon('appimages', 'package-x-generic-symbolic'),
                 'AppImages (AM)',
                 aiCount > 0 ? `{${aiCount} Ausstehend}` : ((appimages.unknown || 0) > 0 ? `{${appimages.unknown} nicht prüfbar}` : '{Alles aktuell}'),
                 aiCount > 0 ? statusOrange : ((appimages.unknown || 0) > 0 ? dimmedColor : statusGreen),
                 textColor,
                 'appimages',
-                isDark
+                isDark,
+                '',
+                () => this._checkUpdateCategories(['appimages'])
             );
             card3Box.add_child(aiRow);
         }
@@ -1305,13 +1400,15 @@ export default class UbuntuMaintenanceExtension extends Extension {
             const gxCount = gext.count || 0;
             const gxBroken = !!gext.broken;
             const gxRow = this._createInteractiveRow(
-                'application-x-addon-symbolic',
+                this._rowIcon('gext', 'application-x-addon-symbolic'),
                 'GNOME Extensions (gext)',
                 gxBroken ? '{Defekt}' : (gxCount > 0 ? `{${gxCount} Ausstehend}` : '{Alles aktuell}'),
                 (gxBroken || gxCount > 0) ? statusOrange : statusGreen,
                 textColor,
                 'gext',
-                isDark
+                isDark,
+                '',
+                () => this._checkUpdateCategories(['gext'])
             );
             card3Box.add_child(gxRow);
         }
@@ -1319,13 +1416,15 @@ export default class UbuntuMaintenanceExtension extends Extension {
         // Zeile 4: Firmware Updates (fwupd)
         const fwCount = fw.count || 0;
         const fwRow = this._createInteractiveRow(
-            'computer-symbolic',
+            this._rowIcon('firmware', 'computer-symbolic'),
             'Firmware (fwupd)',
             fwCount > 0 ? `{${fwCount} Ausstehend}` : '{Alles aktuell}',
             fwCount > 0 ? statusOrange : statusGreen,
             textColor,
             'firmware',
-            isDark
+            isDark,
+            '',
+            () => this._checkUpdateCategories(['firmware'])
         );
         card3Box.add_child(fwRow);
 
@@ -1346,15 +1445,6 @@ export default class UbuntuMaintenanceExtension extends Extension {
             );
             aiItem.connect('activate', () => this._launchTerminal('am -u'));
             menu.addMenuItem(aiItem);
-        }
-
-        if (appimages.available) {
-            const aiCheckItem = new PopupMenu.PopupImageMenuItem(
-                'AppImages jetzt prüfen',
-                'system-search-symbolic'
-            );
-            aiCheckItem.connect('activate', () => this._triggerCheck(true));
-            menu.addMenuItem(aiCheckItem);
         }
 
         if (gext.available && gext.broken) {
@@ -1393,7 +1483,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
         menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const updateItem = new PopupMenu.PopupImageMenuItem(
-            'Aktualisieren …',
+            'System aktualisieren …',
             'software-update-available-symbolic'
         );
         updateItem.connect('activate', () => this._openUpdateWindow());
@@ -1414,7 +1504,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
         menu.addMenuItem(logsItem);
 
         const refreshItem = new PopupMenu.PopupImageMenuItem(
-            'Jetzt aktualisieren',
+            'Alles neu prüfen',
             'view-refresh-symbolic'
         );
         refreshItem.connect('activate', () => {
@@ -1432,7 +1522,22 @@ export default class UbuntuMaintenanceExtension extends Extension {
         menu.addMenuItem(prefsItem);
     }
 
-    _createInteractiveRow(iconName, labelText, statusText, statusColor, textColor, flyoverType = null, isDark = true, suffixText = '') {
+    // Klick (linke Maustaste, Enter/Leertaste) auf eine Zeile im Menü, ohne das Menü zu schließen
+    _connectRowClick(actor, onClick) {
+        actor.connect('button-release-event', (_a, event) => {
+            if (event.get_button() !== Clutter.BUTTON_PRIMARY) return Clutter.EVENT_PROPAGATE;
+            onClick();
+            return Clutter.EVENT_STOP;
+        });
+        actor.connect('key-press-event', (_a, event) => {
+            const k = event.get_key_symbol();
+            if (k !== Clutter.KEY_Return && k !== Clutter.KEY_KP_Enter && k !== Clutter.KEY_space) return Clutter.EVENT_PROPAGATE;
+            onClick();
+            return Clutter.EVENT_STOP;
+        });
+    }
+
+    _createInteractiveRow(iconName, labelText, statusText, statusColor, textColor, flyoverType = null, isDark = true, suffixText = '', onClick = null) {
         const row = new St.BoxLayout({
             vertical: false,
             y_align: Clutter.ActorAlign.CENTER,
@@ -1467,6 +1572,8 @@ export default class UbuntuMaintenanceExtension extends Extension {
             });
             row.add_child(suffixLabel);
         }
+
+        if (onClick) this._connectRowClick(row, onClick);
 
         // Flyover-Sidecar Anbindung
         if (flyoverType) {

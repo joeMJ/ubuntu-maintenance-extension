@@ -1675,6 +1675,30 @@ def build_update_script(plan, selected_ids, cfg, sim=None):
 
 
 
+UPDATE_CHECKS = {"apt": check_apt, "snap": check_snap, "flatpak": check_flatpak, "appimages": check_appimages,
+                 "gext": check_gext, "firmware": check_firmware}
+
+
+def run_update_checks(cats):
+    """Teilprüfung nur der Update-Bereiche (für den Klick im Menü). Bereiche laufen parallel."""
+    cats = [c for c in dict.fromkeys(cats) if c in UPDATE_CHECKS] or list(UPDATE_CHECKS)
+    out = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(cats) + 1) as ex:
+        futs = {c: ex.submit(UPDATE_CHECKS[c]) for c in cats}
+        f_reboot = ex.submit(check_reboot)
+        for c, f in futs.items():
+            try:
+                out[c] = f.result()
+            except Exception as e:
+                out[c] = {"count": 0, "error": str(e)}
+        out["reboot"] = f_reboot.result()
+    if "snap" in out:
+        out["blocked_snaps"] = [item["name"] for item in out["snap"].get("details", []) if item.get("running")]
+    out["checked"] = cats
+    out["timestamp"] = datetime.now().isoformat()
+    return out
+
+
 def run_full_check():
     cfg, cfg_path = load_config()
 
@@ -1774,6 +1798,9 @@ def main():
         elif cmd == "--kernel-text":
             cfg, _ = load_config()
             print(format_kernel(check_kernel(cfg)))
+            return
+        elif cmd == "--check-updates":
+            print(json.dumps(run_update_checks(sys.argv[2:]), ensure_ascii=False))
             return
         elif cmd == "--update-script":
             # Eingabe (stdin): {"selected": ["apt:foo", ...]}; berechnet den Plan frisch und prüft die Auswahl dagegen

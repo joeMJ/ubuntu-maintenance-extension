@@ -128,7 +128,7 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
         const aiIntervals = [1, 6, 24, 168];
         const aiIntervalRow = new Adw.ComboRow({
             title: 'Prüfintervall für AppImages',
-            subtitle: 'Empfohlen: täglich. Neu prüfen: Menü „AppImages jetzt prüfen“.',
+            subtitle: 'Empfohlen: täglich. Neu prüfen: Klick auf die Zeile „AppImages (AM)“ im Menü.',
             model: new Gtk.StringList({
                 strings: ['Stündlich', '6 Stunden', 'Täglich', 'Wöchentlich'],
             }),

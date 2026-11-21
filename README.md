@@ -45,13 +45,13 @@ Native GNOME Shell Extension für Ubuntu 24.04+ (kompatibel mit GNOME 45, 46, 47
     * Snap-Updates mit Konflikterkennung (z. B. laufendes Spotify/CUPS mit Beenden-Button).
     * Flatpak-Updates.
     * GNOME-Extensions-Updates über `gext` (Dry-Run `gext update -n`, nur sichtbar wenn `gext` vorhanden ist); bei defektem `gext` (z. B. pipx nach Python-Sprung) Hinweis mit Reparatur-Button (`pipx reinstall gnome-extensions-cli`).
-    * AppImage-Updates über AM (nur sichtbar, wenn `am` installiert ist): Versionsvergleich `/opt/<app>/version` gegen die aktuelle Quelle, Aktualisierung per Menüeintrag im Terminal (`am -u`). Das Ergebnis wird zwischengespeichert (Standard: 1× täglich, einstellbar stündlich bis wöchentlich; Menüeintrag „AppImages jetzt prüfen“ erzwingt eine neue Abfrage).
+    * AppImage-Updates über AM (nur sichtbar, wenn `am` installiert ist): Versionsvergleich `/opt/<app>/version` gegen die aktuelle Quelle, Aktualisierung per Menüeintrag im Terminal (`am -u`). Das Ergebnis wird zwischengespeichert (Standard: 1× täglich, einstellbar stündlich bis wöchentlich; ein Klick auf die Zeile „AppImages (AM)“ im Menü fragt neu ab).
     * Hinweis auf anstehenden Kernel-/Systemneustart (`/var/run/reboot-required`).
   * **Wartungsaktionen**:
     * 🚀 Starten des interaktiven Wartungsskripts `ubuntumaintenance.sh` im konfigurierten Terminal.
     * 📂 Direktzugriff auf den Protokollordner (`~/.local/state/ubuntu-maintenance-indicator/logs`).
     * 🔄 Sofortige Neuprüfung im Hintergrund (asynchron).
-* **Ruhiger Start nach Anmeldung/Entsperren**: GNOME Shell aktiviert die Extension bei jeder Anmeldung und jedem Entsperren neu. Das Menü baut deshalb sofort aus dem Ergebnis der letzten Prüfung auf (`~/.local/state/ubuntu-maintenance-indicator/last_check.json`), die erste neue Prüfung startet frühestens nach einer einstellbaren Wartezeit (Standard 240 s) und erst, wenn der Rechner ruhig ist (Linux-PSI: CPU- und I/O-Druck unter 10 %, sonst bis zu 5 Wiederholungen im Minutentakt). Manuelle Aktionen („Jetzt aktualisieren“) laufen sofort.
+* **Ruhiger Start nach Anmeldung/Entsperren**: GNOME Shell aktiviert die Extension bei jeder Anmeldung und jedem Entsperren neu. Das Menü baut deshalb sofort aus dem Ergebnis der letzten Prüfung auf (`~/.local/state/ubuntu-maintenance-indicator/last_check.json`), die erste neue Prüfung startet frühestens nach einer einstellbaren Wartezeit (Standard 240 s) und erst, wenn der Rechner ruhig ist (Linux-PSI: CPU- und I/O-Druck unter 10 %, sonst bis zu 5 Wiederholungen im Minutentakt). Manuelle Aktionen („Alles neu prüfen“, Klick auf „System-Updates“ oder eine einzelne Update-Zeile) laufen sofort.
 * **Native Libadwaita Preferences (`prefs.js`)**:
   * Konfigurierbares Prüfintervall, Terminal-Befehl und Panel-Position (Rechts, Mitte, Links).
   * Benachrichtigungs-Schalter für Updates und Sicherheitsalarme.
