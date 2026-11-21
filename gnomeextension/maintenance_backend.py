@@ -282,7 +282,7 @@ def check_appimages(force=None):
     force=True (oder UM_APPIMAGE_FORCE=1) ignoriert den Cache.
     """
     result = {"available": False, "count": 0, "apps": []}
-    if not shutil.which("am"):
+    if not (shutil.which("am") or shutil.which("appman")):
         return result
     result["available"] = True
     if force is None:
@@ -293,7 +293,15 @@ def check_appimages(force=None):
     new_cache = {}
     oldest = now
     _rl_memo = {}
-    for updater in sorted(glob.glob("/opt/*/AM-updater")):
+    # Systeminstallationen (/opt) und Benutzerinstallationen (Ordner aus appman-config); bei Doppelten gilt die Benutzerversion
+    found = {os.path.basename(os.path.dirname(u)): u for u in glob.glob("/opt/*/AM-updater")}
+    try:
+        import am_tool
+        for u in glob.glob(os.path.join(am_tool.configured_user_dir(), "*", "AM-updater")):
+            found[os.path.basename(os.path.dirname(u))] = u
+    except Exception:
+        pass
+    for name_, updater in sorted(found.items()):
         base = os.path.dirname(updater)
         name = os.path.basename(base)
         entry = {"name": name, "state": "error", "installed": "", "latest": ""}
@@ -1231,6 +1239,33 @@ def _fl_label(fl):
     return fl if fl else "ohne Typ"
 
 
+def _appimage_dir(name):
+    """Ordner einer AM-App: Benutzerordner (appman-config) hat Vorrang vor /opt."""
+    try:
+        import am_tool
+        d = os.path.join(am_tool.configured_user_dir(), name)
+        if os.path.isfile(os.path.join(d, "AM-updater")):
+            return d
+    except Exception:
+        pass
+    d = os.path.join("/opt", name)
+    return d if os.path.isfile(os.path.join(d, "AM-updater")) else None
+
+
+def _appimage_user_runnable(name):
+    """True, wenn das Update ohne root geht: Ordner und Updater gehören dem Benutzer/sind schreibbar, kein sudo/doas/pkexec im Updater."""
+    d = _appimage_dir(name)
+    if not d or not (shutil.which("am") or shutil.which("appman")):
+        return False
+    try:
+        if not (os.access(d, os.W_OK) and os.access(os.path.join(d, "AM-updater"), os.W_OK)):
+            return False
+        with open(os.path.join(d, "AM-updater"), encoding="utf-8", errors="replace") as f:
+            return not re.search(r"\b(sudo|doas|pkexec)\b", f.read())
+    except Exception:
+        return False
+
+
 def build_update_plan(cfg, force_appimages=False, sim_override=None):
     """Baut den Update-Plan als Datenstruktur (Gruppen mit Einträgen). Rein lesend."""
     cfg = cfg or {}
@@ -1364,16 +1399,21 @@ def build_update_plan(cfg, force_appimages=False, sim_override=None):
                               "subtitle": e.get("version", ""), "selected": True, "selectable": True, "badge": None, "badge_kind": None}
                              for e in gext_res.get("extensions", []) if e.get("state") == "update"]})
     ai_items = []
+    ai_blocked = 0
     for a in ai_res.get("apps", []):
         if a.get("state") == "update":
+            can_run = _appimage_user_runnable(a["name"])
+            if not can_run:
+                ai_blocked += 1
             ai_items.append({"id": f"appimage:{a['name']}", "name": a["name"], "subtitle": f"{a.get('installed', '')} → {a.get('latest', '')}",
-                             "selected": True, "selectable": True, "badge": "Terminal", "badge_kind": None})
+                             "selected": can_run, "selectable": can_run,
+                             "badge": None if can_run else "Terminal", "badge_kind": None})
     ai_note = ""
     if ai_res.get("unknown"):
         ai_note = f"{ai_res['unknown']} AppImage(s) konnten nicht geprüft werden."
-    groups.append({"id": "appimages", "title": "AppImages (AM)", "auth": "terminal", "items": ai_items,
+    groups.append({"id": "appimages", "title": "AppImages (AM)", "auth": "none", "items": ai_items,
                    "empty": "Keine AppImage-Updates.", "note": ai_note,
-                   "warning": "AM verlangt ein Terminal für die Rechte und wird vorerst dort ausgeführt." if ai_items else ""})
+                   "warning": (f"{ai_blocked} App(s) gehören nicht dem Benutzer oder brauchen Administratorrechte: bitte im Terminal mit „am -u“ aktualisieren." if ai_blocked else "")})
 
     # --- Aufräumen ---
     clean_items = []

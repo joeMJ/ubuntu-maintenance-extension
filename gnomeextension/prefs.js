@@ -9,6 +9,7 @@ import Gtk from 'gi://Gtk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import { UpdateChecker } from './updater.js';
+import { buildAmPage } from './am-page.js';
 
 export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -173,6 +174,9 @@ export default class UbuntuMaintenancePreferences extends ExtensionPreferences {
                 'werden (<tt>am apikey del</tt>, danach neu eintragen). Den Token nie weitergeben oder in ein Repository legen.',
         });
         groupAppImage.add(new Adw.PreferencesRow({ child: tokenHelp, activatable: false, focusable: false }));
+
+        // Seite: AppImages (AM) - Zielordner, Rechteprüfung, Umzugsliste
+        buildAmPage(window, this.path);
 
         // ==========================================
         // Seite 2: Git-Updates & Repository

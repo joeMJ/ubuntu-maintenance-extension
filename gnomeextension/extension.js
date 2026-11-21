@@ -1396,8 +1396,8 @@ export default class UbuntuMaintenanceExtension extends Extension {
         menu.addMenuItem(updateItem);
 
         const maintItem = new PopupMenu.PopupImageMenuItem(
-            'Vollständige Systemwartung starten',
-            'system-run-symbolic'
+            'Legacy-Wartungsscript starten',
+            'utilities-terminal-symbolic'
         );
         maintItem.connect('activate', () => this._runMaintenanceScript());
         menu.addMenuItem(maintItem);

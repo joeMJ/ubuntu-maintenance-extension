@@ -36,12 +36,16 @@ const TEST_HEIGHT = parseInt(GLib.getenv('UM_WINDOW_HEIGHT') ?? '', 10);
 
 const AUTH_HINT = {
     root: 'Administratorrechte nötig.',
-    terminal: 'Läuft vorerst im Terminal (eigene Anmeldung); noch nicht im Fenster.',
-    none: 'Ohne Anmeldung; noch nicht im Fenster (folgt).',
+    terminal: 'Läuft vorerst im Terminal (eigene Anmeldung).',
+    none: 'Ohne Anmeldung.',
 };
 
 // Nur diese Gruppen führt das Fenster in Schritt 2 aus.
-const RUNNABLE = new Set(['apt', 'phased', 'kernel', 'snap', 'firmware', 'cleanup']);
+const RUNNABLE = new Set(['apt', 'phased', 'kernel', 'snap', 'firmware', 'cleanup', 'flatpak', 'appimages']);
+// Ohne root, als normaler Benutzer ausgeführt (kein pkexec)
+const USER_PREFIXES = ['flatpak:', 'appimage:'];
+const FAKE_USER = GLib.getenv('UM_WINDOW_USERFAKE');  // nur Test: statt der echten Befehle 'echo'
+const isUserId = id => USER_PREFIXES.some(p => id.startsWith(p));
 
 // Titel, Untertitel und Beschreibungen werden von libadwaita als Pango-Markup gelesen: immer maskieren.
 const esc = s => GLib.markup_escape_text(String(s ?? ''), -1);
@@ -170,7 +174,69 @@ function buildWindow(app) {
         if (AUTORUN && SHOT) GLib.timeout_add(GLib.PRIORITY_DEFAULT, 600, () => { screenshot(); return GLib.SOURCE_REMOVE; });
     }
 
-    function executeScript(res) {
+    // --- Schritte ohne root: Flatpak und AppImages (AM) als normaler Benutzer ---
+    function userSteps(ids) {
+        const steps = [];
+        const fp = ids.filter(i => i.startsWith('flatpak:')).map(i => i.slice(8));
+        if (fp.length) steps.push({ title: `Flatpak aktualisieren (${fp.length})`, argv: ['flatpak', 'update', '-y', '--noninteractive', ...fp] });
+        const am = GLib.find_program_in_path('am') ?? GLib.find_program_in_path('appman') ?? 'am';
+        for (const id of ids.filter(i => i.startsWith('appimage:'))) {
+            const name = id.slice(9);
+            steps.push({ title: `AppImage ${name} aktualisieren`, argv: [am, '-y', '-u', name] });
+        }
+        return FAKE_USER ? steps.map(s => ({ ...s, argv: ['/bin/sh', '-c', 'echo FAKE "$@"', 'x', ...s.argv] })) : steps;
+    }
+
+    function runOne(argv) {
+        return new Promise(resolve => {
+            let proc;
+            try {
+                proc = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE);
+            } catch (e) { logLine('Start fehlgeschlagen: ' + e.message); resolve(-1); return; }
+            const stream = new Gio.DataInputStream({ base_stream: proc.get_stdout_pipe(), close_base_stream: true });
+            const loop = () => stream.read_line_async(GLib.PRIORITY_DEFAULT, null, (src, r) => {
+                let bytes = null;
+                try { [bytes] = src.read_line_finish(r); } catch (e) { bytes = null; }
+                if (bytes === null) {
+                    proc.wait_async(null, (p, wr) => { try { p.wait_finish(wr); } catch (e) { /* ignorieren */ } resolve(p.get_if_exited() ? p.get_exit_status() : -1); });
+                    return;
+                }
+                const line = new TextDecoder('utf-8', { fatal: false }).decode(bytes).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\r/g, '');
+                if (line.trim() && !/\d+%|^[\s-]+$|^\s*\d+K /.test(line)) logLine('   ' + line);
+                loop();
+            });
+            loop();
+        });
+    }
+
+    // Führt die Schritte nacheinander aus; Rückgabe: Liste der fehlgeschlagenen Schritte.
+    async function runUserSteps(ids) {
+        const steps = userSteps(ids);
+        const failed = [];
+        for (let i = 0; i < steps.length; i++) {
+            runTitle.label = esc(`Schritt ${i + 1} von ${steps.length}: ${steps[i].title}`);
+            logLine(`— ${steps[i].title} —`);
+            progress.pulse();
+            const pulse = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => { progress.pulse(); return GLib.SOURCE_CONTINUE; });
+            const rc = await runOne(steps[i].argv);
+            GLib.source_remove(pulse);
+            progress.fraction = (i + 1) / steps.length;
+            if (rc !== 0) { failed.push(steps[i].title); logLine(`   ✘ Rückgabecode ${rc}`); } else logLine('   ✔ fertig');
+        }
+        return failed;
+    }
+
+    async function runUserOnly(ids, body) {
+        const go = AUTORUN ? true : await confirmRun(body, null);
+        if (!go) { backToOverview(); return; }
+        running = true;
+        showRunView('Aktualisierung läuft …', 'Ohne Administratorrechte, bitte das Fenster nicht schließen.');
+        const failed = await runUserSteps(ids);
+        finishRun(failed.length === 0, failed.length ? 'Nicht alles aktualisiert' : 'Fertig',
+            failed.length ? `Fehlgeschlagen: ${failed.join(' · ')}. Das Protokoll zeigt die Meldung.` : 'Alles erfolgreich. „Zurück zur Übersicht“ zeigt den neuen Stand.');
+    }
+
+    function executeScript(res, userIds = []) {
         running = true;
         showRunView('Installation läuft …', 'Bitte das Fenster nicht schließen.');
         const sm = res.summary ?? {};
@@ -227,7 +293,12 @@ function buildWindow(app) {
                     try { p.wait_finish(wr); } catch (e) { /* ignorieren */ }
                     const code = p.get_if_exited() ? p.get_exit_status() : -1;
                     logLine(`[Prozessende: Rückgabecode ${code}, Ergebniszeile ${resultCode === null ? 'nicht gesehen' : 'gesehen (' + resultCode + ')'}]`);
-                    if (resultCode === 0) finishRun(true, 'Fertig', 'Alles erfolgreich. „Zurück zur Übersicht“ zeigt den neuen Stand (ggf. ist ein Neustart nötig).');
+                    if (resultCode === 0 && userIds.length) {
+                        logLine('— Weiter ohne Administratorrechte: Flatpak/AppImages —');
+                        runUserSteps(userIds).then(f => finishRun(f.length === 0, f.length ? 'Nicht alles aktualisiert' : 'Fertig',
+                            f.length ? `Fehlgeschlagen: ${f.join(' · ')}.` : 'Alles erfolgreich. „Zurück zur Übersicht“ zeigt den neuen Stand (ggf. ist ein Neustart nötig).'));
+                    }
+                    else if (resultCode === 0) finishRun(true, 'Fertig', 'Alles erfolgreich. „Zurück zur Übersicht“ zeigt den neuen Stand (ggf. ist ein Neustart nötig).');
                     else if (resultCode === null && (code === 126 || code === 127)) finishRun(false, 'Abgebrochen', 'Die Anmeldung wurde abgebrochen oder abgelehnt. Es wurde nichts geändert.');
                     else if (resultCode === null && code === 0) finishRun(true, 'Beendet, Ergebnis nicht gemeldet', 'Der Prozess endete ohne Fehler (Rückgabecode 0), hat aber keine Abschlusszeile geschickt. „Zurück zur Übersicht“ zeigt den tatsächlichen Stand.');
                     else if (resultCode === 2) finishRun(false, 'Nichts installiert (Schutz)', failed.length ? failed.join(' · ') : 'Der Kernel-Schutz hat vor der Installation abgebrochen. Es wurde nichts geändert.');
@@ -245,13 +316,24 @@ function buildWindow(app) {
         if (busy || running) return;
         const selected = [...checks.entries()].filter(([, v]) => v.check.sensitive && v.check.active).map(([id]) => id);
         if (selected.length === 0) return;
+        const selectedNames = selected.map(id => checks.get(id)?.name).filter(Boolean);
+        const rootIds = selected.filter(id => !isUserId(id));
+        const userIds = selected.filter(isUserId);
+        const userLines = [];
+        const nFp = userIds.filter(i => i.startsWith('flatpak:')).length, nAi = userIds.filter(i => i.startsWith('appimage:')).length;
+        if (nFp) userLines.push(`• ${nFp} Flatpak${nFp === 1 ? '' : 's'} aktualisieren (ohne Anmeldung)`);
+        if (nAi) userLines.push(`• ${nAi} AppImage${nAi === 1 ? '' : 's'} per AM aktualisieren (ohne Anmeldung)`);
+        if (rootIds.length === 0) {
+            await runUserOnly(userIds, userLines.join('\n') + '\n   (' + selectedNames.slice(0, 8).join(', ') + (selectedNames.length > 8 ? ' …' : '') + ')');
+            return;
+        }
         busy = true;
         showRunView('Prüfe Auswahl …', 'Trockenlauf mit Kernel-Schutz, das dauert einige Sekunden.');
         progress.pulse();
         const pulse = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 150, () => { progress.pulse(); return GLib.SOURCE_CONTINUE; });
         let res;
         try {
-            res = await loadScript(selected);
+            res = await loadScript(rootIds);
         } catch (e) {
             res = { ok: false, problems: [e.message] };
         } finally {
@@ -265,17 +347,22 @@ function buildWindow(app) {
             return;
         }
         const sm = res.summary ?? {};
-        const parts = [];
-        if (sm.install) parts.push(`${sm.install} Pakete installieren`);
-        if (sm.purge) parts.push(`${sm.purge} Pakete entfernen`);
-        if (sm.snap) parts.push(`${sm.snap} Snap(s)`);
-        if (sm.firmware) parts.push(`${sm.firmware} Firmware-Update(s)`);
-        let body = parts.join(', ') + '.';
+        // Bestätigung: nur was passiert, das Skript selbst liegt hinter 'Details anzeigen'.
+        const n = (cnt, one, many) => `${cnt} ${cnt === 1 ? one : many}`;
+        const lines = [];
+        if (sm.install) lines.push(`• ${n(sm.install, 'Paket', 'Pakete')} installieren`);
+        if (sm.purge) lines.push(`• ${n(sm.purge, 'Paket', 'Pakete')} entfernen`);
+        if (sm.snap) lines.push(`• ${n(sm.snap, 'Snap', 'Snaps')} aktualisieren`);
+        if (sm.firmware) lines.push(`• ${n(sm.firmware, 'Firmware-Update', 'Firmware-Updates')} einspielen`);
+        if (selectedNames.length) lines.push(`   (${selectedNames.slice(0, 8).join(', ')}${selectedNames.length > 8 ? ' …' : ''})`);
+        lines.push(...userLines);
+        lines.push('• Einmalige Anmeldung für die Administrator-Schritte, Ablauf in diesem Fenster');
+        lines.push('• Der Kernel-Schutz hat die Auswahl geprüft.');
+        let body = lines.join('\n');
         if ((res.extra ?? []).length) body = `ACHTUNG: Gewählt ${sm.install}, installiert werden aber ${sm.total} Pakete.\napt braucht ${res.extra.length} weitere wegen Abhängigkeiten (z. B. gleiche Version zusammengehöriger Pakete):\n${res.extra.slice(0, 14).join(', ')}${res.extra.length > 14 ? ' …' : ''}\n\n` + body;
-        body += '\n\nDanach folgt eine einmalige Anmeldung. Das Skript ist unten vollständig zu sehen.';
         const go = AUTORUN ? true : await confirmRun(body, res.script);
         if (!go) { backToOverview(); return; }
-        executeScript(res);
+        executeScript(res, userIds);
     }
 
     function confirmRun(body, script) {
@@ -287,8 +374,10 @@ function buildWindow(app) {
             dlg.set_default_response('go');
             dlg.set_close_response('cancel');
             const tv = new Gtk.TextView({ editable: false, cursor_visible: false, monospace: true, wrap_mode: Gtk.WrapMode.WORD_CHAR });
-            tv.get_buffer().set_text(script, -1);
-            dlg.set_extra_child(new Gtk.ScrolledWindow({ child: tv, min_content_height: 180, min_content_width: 460, css_classes: ['card'] }));
+            tv.get_buffer().set_text(script ?? '', -1);
+            const details = new Gtk.Expander({ label: 'Details anzeigen (das Skript, das mit root-Rechten läuft)', expanded: false,
+                child: new Gtk.ScrolledWindow({ child: tv, min_content_height: 180, min_content_width: 460, css_classes: ['card'] }) });
+            if (script) dlg.set_extra_child(details);
             dlg.choose(win, null, (d, r) => { resolve(d.choose_finish(r) === 'go'); });
         });
     }
@@ -317,7 +406,7 @@ function buildWindow(app) {
         row.add_prefix(check);
         row.activatable_widget = check;
         if (it.badge) row.add_suffix(badge(it.badge, it.badge_kind));
-        checks.set(it.id, { check, group: g });
+        checks.set(it.id, { check, group: g, name: it.name });
         check.connect('toggled', () => { withMasterSync(); updateSummary(); });
         container(row);
         return check;
@@ -331,7 +420,7 @@ function buildWindow(app) {
         } else {
             const check = new Gtk.CheckButton({ active: !!it.selected, valign: Gtk.Align.CENTER });
             expander.add_prefix(check);
-            checks.set(it.id, { check, group: g });
+            checks.set(it.id, { check, group: g, name: it.name });
             check.connect('toggled', () => { sync(); updateSummary(); });
         }
         if (it.badge) expander.add_suffix(badge(it.badge, it.badge_kind));
