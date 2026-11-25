@@ -99,6 +99,7 @@ Die Einstellungsseite „AppImages (AM)“ (`am-page.js`, `am_tool.py`) arbeitet
 - **Suchen und installieren:** Suche in der AM-Datenbank (`am -q`), Installation per `am -i --user` mit anschließender Prüfung (Programmdatei, Updater, Link, Start).
 - **Externes GitHub-AppImage:** Für Programme außerhalb der Datenbank (`am -e --user nutzer/projekt name [Schlüsselwort]`), z. B. Thorium mit Variante AVX2. Bestehende Systeminstallationen, die so installiert wurden, werden als Vorschlag angeboten (Repository und Schlüsselwort stehen im `AM-updater`).
 - **Umzug** der systemweiten AppImages aus `/opt` in den Benutzerordner. Das Entfernen der Systemversionen braucht eine Anmeldung (Skript vorher einsehbar).
+- **Benachrichtigungen von AM:** Ein Schalter blendet die Meldungen („… is updated!“) bei AppImage-Updates aus oder ein (`am --disable-notifications` / `--enable-notifications`, läuft als normaler Benutzer). Angezeigt wird, wie viele Updater noch melden; nicht beschreibbare Updater werden benannt.
 
 ### Kernel-Schutz im Wartungsskript
 `ubuntumaintenance.sh` führt vor jedem `dist-upgrade` einen Trockenlauf aus (`apt-get -s dist-upgrade`). Würde dabei ein Kernel-Paket mit nicht erlaubtem Typ (z. B. `-gke`) installiert, wird `dist-upgrade` mit deutlicher Warnung übersprungen (mit `--ask` ist ein ausdrückliches Weitermachen möglich, Standard: Nein). Zusätzlich bietet das Skript an, `/etc/apt/preferences.d/no-cloud-kernels` anzulegen, eine APT-Sperre für Cloud-Kernel (`gke`, `gcp`, `aws`, `azure`, `oracle`, `ibm`, `kvm`).

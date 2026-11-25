@@ -45,6 +45,13 @@ const RUNNABLE = new Set(['apt', 'phased', 'kernel', 'snap', 'firmware', 'cleanu
 // Ohne root, als normaler Benutzer ausgeführt (kein pkexec)
 const USER_PREFIXES = ['flatpak:', 'appimage:'];
 const FAKE_USER = GLib.getenv('UM_WINDOW_USERFAKE');  // nur Test: statt der echten Befehle 'echo'
+// Ergebnisse, nach denen sich der Stand geändert haben kann (dann wird neu geprüft)
+const RECHECK_AFTER = new Set(['Fertig', 'Nicht alles aktualisiert', 'Beendet, Ergebnis nicht gemeldet', 'Nicht vollständig durchgelaufen']);
+// Wird gesetzt, wenn ein Lauf stattgefunden hat: der Prozess endet dann mit Rückgabecode 10, damit die Extension
+// ihr Menü neu prüfen kann.
+let didUpdate = false;
+const EXIT_UPDATED = 10;
+
 const isUserId = id => USER_PREFIXES.some(p => id.startsWith(p));
 
 // Titel, Untertitel und Beschreibungen werden von libadwaita als Pango-Markup gelesen: immer maskieren.
@@ -138,6 +145,7 @@ function buildWindow(app) {
     let busy = false;
     let running = false;
     let autoStarted = false;
+    let lastPlan = null;   // frisch geprüfter Stand nach einem Lauf (wird beim Zurückgehen angezeigt)
 
     function logLine(text) {
         const buf = logView.get_buffer();
@@ -160,7 +168,13 @@ function buildWindow(app) {
         refreshBtn.sensitive = true;
         logView.get_buffer().set_text('', -1);
         progress.fraction = 0;
-        refresh(false).catch(e => console.error(e));
+        if (lastPlan) {
+            const plan = lastPlan;
+            lastPlan = null;
+            renderPlan(plan);
+        } else {
+            refresh(false).catch(e => console.error(e));
+        }
     }
     doneBtn.connect('clicked', backToOverview);
 
@@ -171,7 +185,37 @@ function buildWindow(app) {
         runSub.label = esc(detail ?? '');
         doneBtn.visible = true;
         hint.label = '';
-        if (AUTORUN && SHOT) GLib.timeout_add(GLib.PRIORITY_DEFAULT, 600, () => { screenshot(); return GLib.SOURCE_REMOVE; });
+        if (RECHECK_AFTER.has(headline)) recheckAfterRun();
+        else if (AUTORUN && SHOT) GLib.timeout_add(GLib.PRIORITY_DEFAULT, 600, () => { screenshot(); return GLib.SOURCE_REMOVE; });
+    }
+
+    // Nach einem Lauf, der etwas geändert haben kann: Stand aller Bereiche frisch prüfen (AppImages mit erzwungener
+    // Neuabfrage), damit nach der Rückkehr nichts Bereits-Installiertes mehr als ausstehend erscheint.
+    async function recheckAfterRun() {
+        didUpdate = true;
+        lastPlan = null;
+        if (busy) return;
+        busy = true;
+        doneBtn.sensitive = false;
+        spinner.spinning = true;
+        hint.label = 'Stand wird neu geprüft …';
+        logLine('— Stand wird neu geprüft —');
+        try {
+            const plan = await loadPlan(true);
+            lastPlan = plan;
+            const t = plan.totals ?? {};
+            const open = ['apt', 'phased', 'kernel', 'snap', 'flatpak', 'firmware', 'appimages'].reduce((n, k) => n + (t[k] ?? 0), 0);
+            logLine(open === 0 ? '   ✔ Alle Bereiche sind auf dem neuesten Stand.' : `   ℹ Noch ausstehend: ${open} (siehe Übersicht).`);
+        } catch (e) {
+            lastPlan = null;
+            logLine(`   ✘ Neuprüfung fehlgeschlagen: ${e.message}. „Zurück zur Übersicht“ prüft erneut.`);
+        } finally {
+            busy = false;
+            doneBtn.sensitive = true;
+            spinner.spinning = false;
+            hint.label = '';
+            if (AUTORUN && SHOT) GLib.timeout_add(GLib.PRIORITY_DEFAULT, 600, () => { screenshot(); return GLib.SOURCE_REMOVE; });
+        }
     }
 
     // --- Schritte ohne root: Flatpak und AppImages (AM) als normaler Benutzer ---
@@ -594,4 +638,5 @@ app.connect('activate', () => {
     if (existing) existing.present();
     else buildWindow(app);
 });
-app.run([System.programInvocationName]);
+const appStatus = app.run([System.programInvocationName]);
+System.exit(didUpdate && appStatus === 0 ? EXIT_UPDATED : appStatus);

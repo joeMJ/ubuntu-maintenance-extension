@@ -95,6 +95,41 @@ export function buildAmPage(window, extPath) {
     const statusRow = new Adw.ActionRow({ title: 'Status', subtitle: 'Wird geprüft …' });
     gStatus.add(statusRow);
 
+    // --- Benachrichtigungen von AM ---
+    const gNotify = new Adw.PreferencesGroup({
+        title: 'Benachrichtigungen von AM',
+        description: 'AM zeigt bei jedem AppImage-Update bis zu zwei Meldungen. Bei vielen Programmen sind das sehr viele; hier lässt sich das abschalten.',
+    });
+    page.add(gNotify);
+    const notifyRow = new Adw.SwitchRow({ title: 'Meldungen bei AppImage-Updates', subtitle: 'Wird geprüft …', sensitive: false });
+    gNotify.add(notifyRow);
+    let notifyBusy = false;
+    const showNotify = (st, err = '') => {
+        notifyBusy = true;
+        notifyRow.active = !st.disabled;
+        notifyBusy = false;
+        notifyRow.sensitive = !!st.can_run;
+        let sub;
+        if (!st.can_run) sub = 'AM wurde nicht gefunden.';
+        else if (st.disabled) sub = st.active === 0 ? `Aus: ${st.total} Updater melden nichts.` : `Aus, aber ${st.active} von ${st.total} Updatern melden noch.`;
+        else sub = `An: ${st.active} von ${st.total} Updatern melden.`;
+        if (err) sub += ` ${err}`;
+        notifyRow.subtitle = esc(sub);
+    };
+    const loadNotify = async () => {
+        try { showNotify(await runTool(extPath, ['--am-notify-status'])); }
+        catch (e) { notifyRow.subtitle = esc(`Fehler: ${e.message}`); }
+    };
+    notifyRow.connect('notify::active', () => {
+        if (notifyBusy) return;
+        const want = notifyRow.active;
+        notifyRow.sensitive = false;
+        notifyRow.subtitle = 'Wird umgestellt …';
+        runTool(extPath, ['--am-notify', want ? 'on' : 'off'])
+            .then(res => showNotify(res.status ?? {}, res.ok ? '' : (res.error ?? '')))
+            .catch(e => { notifyRow.subtitle = esc(`Fehler: ${e.message}`); loadNotify(); });
+    });
+
     // --- Zielordner ---
     const gDir = new Adw.PreferencesGroup({ title: 'Zielordner', description: 'Hier landen die AppImages nach dem Umzug.' });
     page.add(gDir);
@@ -442,5 +477,6 @@ export function buildAmPage(window, extPath) {
 
     load(null);
     loadHints();
+    loadNotify();
     return page;
 }

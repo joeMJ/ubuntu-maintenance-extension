@@ -142,6 +142,14 @@ export default class UbuntuMaintenanceExtension extends Extension {
     }
 
     disable() {
+        if (this._updateWindowCancel) {
+            this._updateWindowCancel.cancel();
+            this._updateWindowCancel = null;
+        }
+        if (this._recheckTimeoutId) {
+            GLib.source_remove(this._recheckTimeoutId);
+            this._recheckTimeoutId = null;
+        }
         if (this._timeoutId) {
             GLib.source_remove(this._timeoutId);
             this._timeoutId = null;
@@ -348,7 +356,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
 
     // Teilprüfung einzelner Update-Bereiche (Klick auf 'System-Updates' oder eine Zeile darunter).
     // Das Menü bleibt offen; die betroffenen Zeilen zeigen während der Prüfung das Aktualisieren-Symbol.
-    _checkUpdateCategories(cats) {
+    _checkUpdateCategories(cats, forceAppimages = true) {
         const todo = cats.filter(c => !this._checkingCats.has(c));
         if (todo.length === 0 || this._isChecking) return;
         todo.forEach(c => this._checkingCats.add(c));
@@ -360,7 +368,7 @@ export default class UbuntuMaintenanceExtension extends Extension {
             const aiHours = this._settings ? this._settings.get_int('appimage-check-interval-hours') : 24;
             launcher.setenv('UM_APPIMAGE_INTERVAL_HOURS', String(aiHours), true);
             // Ein ausdrücklicher Klick fragt die AppImages neu ab (ersetzt den früheren Eintrag 'AppImages jetzt prüfen')
-            launcher.setenv('UM_APPIMAGE_FORCE', todo.includes('appimages') ? '1' : '0', true);
+            launcher.setenv('UM_APPIMAGE_FORCE', todo.includes('appimages') && forceAppimages ? '1' : '0', true);
             const proc = launcher.spawnv(['/usr/bin/python3', this._backendScript, '--check-updates', ...todo]);
             proc.communicate_utf8_async(null, null, (source, res) => {
                 todo.forEach(c => this._checkingCats.delete(c));
@@ -1694,11 +1702,39 @@ export default class UbuntuMaintenanceExtension extends Extension {
         try {
             if (!GLib.file_test(script, GLib.FileTest.EXISTS))
                 throw new Error('update-window.js fehlt (bitte die Extension neu installieren)');
-            Gio.Subprocess.new(['/usr/bin/gjs', '-m', script], Gio.SubprocessFlags.NONE);
+            const proc = Gio.Subprocess.new(['/usr/bin/gjs', '-m', script], Gio.SubprocessFlags.NONE);
+            // Endet das Fenster nach einem Lauf (Rückgabecode 10), prüft das Menü die Bereiche neu. Das Fenster hat die
+            // AppImages bereits frisch abgefragt (Zwischenspeicher), deshalb hier ohne erzwungene Neuabfrage.
+            if (this._updateWindowCancel) this._updateWindowCancel.cancel();
+            const cancel = new Gio.Cancellable();
+            this._updateWindowCancel = cancel;
+            proc.wait_async(cancel, (p, res) => {
+                try { p.wait_finish(res); } catch (e) { return; }  // abgebrochen (Extension deaktiviert)
+                if (this._updateWindowCancel === cancel) this._updateWindowCancel = null;
+                if (p.get_if_exited() && p.get_exit_status() === 10)
+                    this._recheckAfterUpdateWindow();
+            });
         } catch (e) {
             console.error(`[ubuntu-maintenance] Aktualisieren-Fenster nicht startbar: ${e.message}`);
             Main.notify('Aktualisieren', `Das Fenster konnte nicht gestartet werden: ${e.message}`);
         }
+    }
+
+    // Nach einem Lauf im Aktualisieren-Fenster: betroffene Bereiche neu prüfen, damit das Menü den neuen Stand zeigt.
+    _recheckAfterUpdateWindow(retries = 6) {
+        const cats = ['apt', 'snap', 'flatpak', 'appimages', 'firmware'];
+        if (this._isChecking || cats.some(c => this._checkingCats.has(c))) {
+            // läuft gerade eine andere Prüfung: kurz warten und erneut versuchen
+            if (retries > 0) {
+                this._recheckTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                    this._recheckTimeoutId = null;
+                    this._recheckAfterUpdateWindow(retries - 1);
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
+            return;
+        }
+        this._checkUpdateCategories(cats, false);
     }
 
     _launchTerminal(command) {

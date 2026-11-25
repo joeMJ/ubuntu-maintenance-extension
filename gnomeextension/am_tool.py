@@ -14,6 +14,8 @@ Aufruf (über maintenance_backend.py oder direkt):
   am_tool.py --am-install-new <name> [<name>…]   (Benutzerordner, ohne root)
   am_tool.py --am-extra-hints                    (rein lesend)
   am_tool.py --am-install-extra <nutzer/projekt> <name> [<Schlüsselwort>]
+  am_tool.py --am-notify-status                  (rein lesend)
+  am_tool.py --am-notify on|off                  (AM-Benachrichtigungen bei Updates ein-/ausschalten)
 """
 
 import glob
@@ -186,6 +188,66 @@ def am_status():
         "user_apps": user_apps,
         "can_run_user_mode": bool(am or appman),
     }
+
+
+# --- Benachrichtigungen von AM -------------------------------------------------------------------
+# AM schreibt in jeden AM-updater ein 'notify-send' (zwei Meldungen je Update). `am --disable-notifications`
+# kommentiert diese Zeilen in allen Updatern aus und legt die Datei <XDG_DATA_HOME>/AM/disable-notifications an
+# (neu installierte Apps übernehmen das); `am --enable-notifications` macht beides rückgängig.
+AM_DATADIR = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "AM")
+NOTIFY_FLAG = os.path.join(AM_DATADIR, "disable-notifications")
+_NOTIFY_ACTIVE_RE = re.compile(r"^[ \t]*notify-send\b", re.M)
+
+
+def notify_status():
+    """Zustand der AM-Benachrichtigungen (rein lesend)."""
+    updaters = sorted(glob.glob(SYSTEM_GLOB))
+    user_dir = configured_user_dir()
+    if os.path.isdir(user_dir):
+        updaters += sorted(glob.glob(os.path.join(user_dir, "*", "AM-updater")))
+    active = []
+    unreadable = 0
+    for u in updaters:
+        try:
+            with open(u, encoding="utf-8", errors="replace") as f:
+                if _NOTIFY_ACTIVE_RE.search(f.read()):
+                    active.append(os.path.basename(os.path.dirname(u)))
+        except OSError:
+            unreadable += 1
+    return {
+        "flag_file": NOTIFY_FLAG,
+        "disabled": os.path.isfile(NOTIFY_FLAG),
+        "total": len(updaters),
+        "active": len(active),
+        "active_apps": active[:30],
+        "unreadable": unreadable,
+        "can_run": bool(shutil.which("am") or shutil.which("appman")),
+    }
+
+
+def set_notifications(enable):
+    """Schaltet die AM-Benachrichtigungen ein (enable=True) oder aus; läuft als normaler Benutzer."""
+    am = shutil.which("am") or shutil.which("appman")
+    if not am:
+        return {"ok": False, "error": "AM (am/appman) wurde nicht gefunden.", "status": notify_status()}
+    arg = "--enable-notifications" if enable else "--disable-notifications"
+    env = dict(os.environ, TERM="dumb", NO_COLOR="1")
+    try:
+        r = subprocess.run([am, arg], capture_output=True, text=True, timeout=120, env=env, stdin=subprocess.DEVNULL)
+        rc, out = r.returncode, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return {"ok": False, "error": f"{arg} fehlgeschlagen: {e}", "status": notify_status()}
+    st = notify_status()
+    if enable:
+        ok = rc == 0 and not st["disabled"]
+        problem = "" if ok else "Das Einschalten ist nicht vollständig gelungen."
+    else:
+        # Erfolg: Marke gesetzt und keine aktive Meldungszeile mehr (nicht beschreibbare Updater bleiben aktiv)
+        ok = rc == 0 and st["disabled"] and st["active"] == 0
+        problem = "" if ok else (
+            f"{st['active']} Updater melden weiterhin (vermutlich nicht beschreibbar): {', '.join(st['active_apps'][:8])}"
+            if st["disabled"] else "Das Ausschalten ist nicht gelungen.")
+    return {"ok": ok, "error": problem, "output": out[-400:], "status": st}
 
 
 def migration_plan(target_dir=None):
@@ -659,6 +721,10 @@ def main(argv):
         print(json.dumps(extra_hints(), ensure_ascii=False))
     elif cmd == "--am-install-extra" and len(argv) > 2:
         return install_extra(argv[1], argv[2], argv[3] if len(argv) > 3 else "")
+    elif cmd == "--am-notify-status":
+        print(json.dumps(notify_status(), ensure_ascii=False))
+    elif cmd == "--am-notify" and len(argv) > 1 and argv[1] in ("on", "off"):
+        print(json.dumps(set_notifications(argv[1] == "on"), ensure_ascii=False))
     elif cmd == "--am-verify" and len(argv) > 2:
         ok, msgs = verify_user_app(os.path.abspath(os.path.expanduser(argv[1])), argv[2])
         print(json.dumps({"ok": ok, "msgs": msgs}, ensure_ascii=False))
